@@ -87,6 +87,7 @@ AMSA is a multi-vertical technology marketplace combining Transportation, Logist
 | 64 | SHIELD — Autonomous Cybersecurity, Threat Intelligence & Platform Defense Swarm | `29-shield.md` |
 | 65 | ORGANISM — Global AI Organism Architecture (8 layers, 120,000+ agents) | `30-organism.md` |
 | 66 | Autonomous AI Mobility, Vehicle Intelligence & Self-Driving System | `31-autonomous-mobility.md` |
+| 67 | Interstate Logistics & Long-Distance Freight Services | `32-interstate-logistics.md` |
 
 ## Platform Apps & Brands
 

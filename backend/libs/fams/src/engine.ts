@@ -113,6 +113,8 @@ export const PLATFORM_MODULES = [
   'video_calls', 'voice_calls', 'chat', 'tourism',
   // autonomous mobility (docs/31) — tracking live, autonomy OFF by default
   'vehicle_tracking', 'driver_assistance', 'self_driving', 'autonomous_delivery',
+  // interstate logistics (docs/32) — marketplace live, permitted cargo + cross-border OFF
+  'interstate_logistics', 'cold_chain', 'corporate_logistics', 'permitted_cargo', 'cross_border_logistics',
 ] as const;
 
 /** Spec user groups — features can be scoped to any combination. */

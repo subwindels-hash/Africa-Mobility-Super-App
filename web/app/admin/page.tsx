@@ -8,6 +8,7 @@ const NAV = [
   { label: 'SHIELD SOC', icon: '🛡' },
   { label: 'ORGANISM', icon: '🧠' },
   { label: 'Mobility CC', icon: '📡' },
+  { label: 'Interstate', icon: '🚚' },
   { label: 'WhatsApp AI', icon: '💬' },
   { label: 'KYC queue', icon: '🕵' },
   { label: 'Vendor review', icon: '🏢' },

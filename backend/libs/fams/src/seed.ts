@@ -108,6 +108,16 @@ export function seedFams(engine: FamsEngine, activePhase = 4): void {
   engine.upsertRule({ level: 'global', target: { kind: 'feature', code: 'mob.tracking' }, value: 'on', note: 'AI vehicle tracking live', updatedBy: 'seed' });
   // Operating-mode control example: supervised autonomy permitted only in a pilot road zone
   engine.upsertRule({ level: 'road_zone', selector: 'zone:NG-LAG-EKO-ATLANTIC', target: { kind: 'feature', code: 'mob.supervised_autonomy' }, value: 'on', note: 'Supervised-autonomy pilot corridor (Eko Atlantic)', updatedBy: 'seed' });
+
+  // ── Interstate Logistics & Long-Distance Freight (docs/32) ────────────────
+  engine.upsertRule({ level: 'global', target: { kind: 'feature', code: 'ilst.marketplace' }, value: 'on', note: 'Nationwide interstate logistics marketplace — launch', updatedBy: 'seed' });
+  engine.upsertRule({ level: 'global', target: { kind: 'feature', code: 'ilst.cold_chain' }, value: 'on', note: 'Refrigerated logistics live', updatedBy: 'seed' });
+  engine.upsertRule({ level: 'global', target: { kind: 'feature', code: 'ilst.corporate' }, value: 'on', note: 'Corporate logistics accounts live', updatedBy: 'seed' });
+  engine.upsertRule({ level: 'global', target: { kind: 'feature', code: 'ilst.permitted_cargo' }, value: 'off', note: 'Livestock/heavy-haul — only where legally permitted (state-level activation)', updatedBy: 'seed' });
+  engine.upsertRule({ level: 'state', selector: 'NG-KAN', target: { kind: 'feature', code: 'ilst.permitted_cargo' }, value: 'on', note: 'Livestock transport permitted & certified in Kano', updatedBy: 'seed' });
+  engine.upsertRule({ level: 'state', selector: 'NG-KAD', target: { kind: 'feature', code: 'ilst.permitted_cargo' }, value: 'on', note: 'Livestock transport permitted & certified in Kaduna', updatedBy: 'seed' });
+  engine.upsertRule({ level: 'global', target: { kind: 'feature', code: 'ilst.cross_border' }, value: 'off', note: 'Cross-Border African Logistics — future phase', updatedBy: 'seed' });
+  engine.upsertRule({ level: 'global', target: { kind: 'category', code: 'veh.tanker' }, value: 'off', note: 'Tanker (fuel/chemicals) pending HSE compliance review', updatedBy: 'seed' });
   engine.upsertRule({ level: 'global', target: { kind: 'feature', code: 'mob.supervised_autonomy' }, value: 'off', note: 'Supervised autonomy OFF outside approved corridors', updatedBy: 'seed' });
 
   // Geofenced activation: airport transfer category only inside MMIA fence (15km)

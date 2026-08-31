@@ -11,15 +11,15 @@ export type WaLanguage = 'en' | 'pcm' | 'ha' | 'yo' | 'ig';
 
 export type WaIntent =
   | 'greeting'
-  | 'book_transport' | 'book_logistics' | 'book_travel' | 'book_aviation'
+  | 'book_transport' | 'book_logistics' | 'book_interstate' | 'book_travel' | 'book_aviation'
   | 'book_security' | 'book_accommodation' | 'roadside_assist'
-  | 'track_order' | 'wallet_balance' | 'wallet_fund' | 'payment'
+  | 'track_order' | 'track_shipment' | 'wallet_balance' | 'wallet_fund' | 'payment'
   | 'modify_booking' | 'cancel_booking' | 'refund_support'
   | 'check_availability' | 'manage_services'
   | 'human_agent' | 'unknown';
 
 export const INTENT_VERTICAL: Partial<Record<WaIntent, string>> = {
-  book_transport: 'transportation', book_logistics: 'logistics', book_travel: 'travel',
+  book_transport: 'transportation', book_logistics: 'logistics', book_interstate: 'logistics', book_travel: 'travel',
   book_aviation: 'aviation', book_security: 'security',
   book_accommodation: 'accommodation', roadside_assist: 'roadside',
 };
@@ -55,6 +55,8 @@ const RULES: IntentRule[] = [
   { intent: 'book_security', patterns: [/security|escort|body ?guard|executive protection|convoy|protection service|vip escort|secure/i], weight: 3 },
   { intent: 'book_accommodation', patterns: [/hotel|apartment|short ?let|shortlet|lodge|accommodation|book.*(room|stay)|airbnb/i], weight: 3 },
   { intent: 'roadside_assist', patterns: [/tow(ing)?|breakdown|mechanic|jump ?start|battery|fuel (delivery|assist)|ran out of (fuel|petrol)|tyre|tire|puncture|car (won'?t|wont) start|vehicle recovery|engine (problem|issue)/i], weight: 3 },
+  { intent: 'book_interstate', patterns: [/interstate|freight|haulage|\bftl\b|\bltl\b|full truck|less than truck|shared cargo|(cargo|freight) (from|to)|truck.*(lagos|abuja|kano|ph|ibadan|kaduna)|cold chain|refrigerated|container (transport|move|to)|heavy (equipment|haul)|40 ?feet|line ?haul|\d+\s*(tonnes?|tons|tonne)\b|tonnes? of /i], weight: 4 },
+  { intent: 'track_shipment', patterns: [/track.*(shipment|cargo|freight|consignment|truck)|where.*(truck|cargo|shipment|consignment)|shipment.*(status|update|eta|position)/i], weight: 4 },
   { intent: 'book_logistics', patterns: [/dispatch|deliver|delivery|parcel|package|courier|send.*(document|item|goods|package)|drop off|pick ?up.*(package|parcel)|shipment|waybill/i], weight: 2 },
   { intent: 'book_transport', patterns: [/taxi|cab\b|\bride\b|drop me|carry me|take me|airport (pick ?up|transfer|pickup)|hotel transfer|chauffeur|intercity|vip (transport|car)|uber|bolt|car to/i], weight: 2 },
   { intent: 'track_order', patterns: [/where.*(rider|driver|package|parcel|booking|order|my (taxi|cab|driver))|track(ing)?\b|eta\b|how far.*(driver|rider|order)/i], weight: 3 },

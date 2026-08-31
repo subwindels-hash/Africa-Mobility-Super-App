@@ -45,6 +45,7 @@ import * as wa from '../../libs/whatsapp/src/index';
 import { shield } from '../../libs/shield/src/index';
 import { organism, TOTAL_AGENTS, LAYERS, fleetSummary, EXECUTIVE_CLUSTERS } from '../../libs/organism/src/index';
 import { MobilitySystem, COMMAND_AUTH_MODEL } from '../../libs/mobility/src/index';
+import { InterstateSystem, InterstateWhatsAppBridge, haversineKm } from '../../libs/interstate/src/index';
 import {
   FamsEngine, type FamsRule, type FamsValue, type FamsLevel, type FamsContext, type FamsTargetKind,
   PLATFORM_MODULES, VERTICAL_MODULE, CATEGORY_VERTICAL, PHASES, ASSET_TYPES, VENDOR_STATE_VALUE,
@@ -710,6 +711,202 @@ app.post('/v1/mobility/vehicle-command', (req, res) => {
   if (signal) return problem(res, 403, 'VEHICLE_SECURITY_BLOCK', `Command rejected — ${signal}`, { signal, authModel: COMMAND_AUTH_MODEL });
   res.json({ accepted: true, authModel: COMMAND_AUTH_MODEL });
 });
+
+// ─── INTERSTATE LOGISTICS & LONG-DISTANCE FREIGHT (docs/32) ──────────────────
+// Nationwide freight marketplace — platform owns no trucks; verified partners
+// only. Escrow = core domain (fund → hold → milestones → settlement split).
+const ilstEscrow = new Map<string, core.EscrowHold>();
+const interstate = new InterstateSystem(
+  {
+    feature: (f, ctx) => fams.evaluate('feature', f, ctx as any).available,
+    category: (c, ctx) => fams.evaluate('category', c, ctx as any).available,
+    vendor: (v, ctx) => fams.evaluate('vertical', 'logistics', { ...(ctx as any), vendorId: v }).available,
+  },
+  {
+    openEscrow: (bookingId, customer, vendor, totalMinor, milestones) => {
+      const hold = core.openEscrow({ bookingId, customer, vendor, total: core.money(totalMinor, 'NGN'), milestones });
+      ilstEscrow.set(hold.id, hold);
+      return { escrowId: hold.id, state: hold.state };
+    },
+    fund: (id) => { const h = core.fund(ilstEscrow.get(id)!); return h.state; },
+    begin: (id) => { const h = core.beginService(ilstEscrow.get(id)!); return h.state; },
+    releaseMilestone: (id, index) => { const h = core.releaseMilestone(ilstEscrow.get(id)!, index, core.DEFAULT_RULE); return h.state; },
+    releaseOnCompletion: (id) => {
+      const { hold, split } = core.releaseOnCompletion(ilstEscrow.get(id)!, 'completed', core.DEFAULT_RULE);
+      return { vendorPayoutMinor: split.vendorNet.amount };
+    },
+    refund: (id) => {
+      const hold = ilstEscrow.get(id)!;
+      core.openDispute(hold);
+      core.resolveDispute(hold, { type: 'refund_customer' }, core.DEFAULT_RULE);
+      return hold.state;
+    },
+    hold: (id) => ilstEscrow.get(id),
+  },
+  { observe: (o) => organism.graph.observe({ ...o, ts: new Date() } as any) },
+);
+// seed three verified logistics partners (demo marketplace)
+for (const [id, name, rating, onTime, fleets] of [
+  ['vnd_bolt_haul', 'Bolt Haul Nigeria', 4.8, 96, { heavy_truck: 12, articulated_trailer: 6, box_truck: 10, flatbed_truck: 4, medium_truck: 8, container_truck: 3, low_loader: 2, mini_van: 6, cargo_van: 8, pickup_truck: 5, light_truck: 4, refrigerated_truck: 2, tanker: 1, specialized_heavy_haul: 1 }],
+  ['vnd_dangote_log', 'Dangote Logistics', 4.6, 93, { heavy_truck: 20, articulated_trailer: 10, box_truck: 14, flatbed_truck: 8, medium_truck: 12, container_truck: 5, low_loader: 3, refrigerated_truck: 3, tanker: 4 }],
+  ['vnd_cold_express', 'ColdExpress Freight', 4.9, 98, { refrigerated_truck: 8, medium_truck: 4, box_truck: 6 }],
+] as const) {
+  interstate.registerVendor(id, id === 'vnd_cold_express' ? 'cold_chain_operator' : 'trucking_company');
+  for (const step of interstate.verificationSteps) interstate.decideVerification(id, step, 'approved', 'admin_seed');
+  interstate.marketplace.registerProvider({
+    vendorId: id, name, verified: true, rating, onTimePct: onTime, fleets,
+    regions: ['NG-LAG', 'NG-KAN', 'NG-FCT', 'NG-RIV', 'NG-OYO', 'NG-KAD'],
+  });
+}
+// Ada (WhatsApp Smart AI) ↔ interstate freight desk
+const adaInterstate = new InterstateWhatsAppBridge(interstate);
+wa.setInterstateBridge({ handle: (phone, session, nlu, rawText) => adaInterstate.handle(phone, session, nlu, rawText) as any });
+
+const ilstCtx = (b: any) => ({ country: 'NG', state: b.originState, userGroups: [b.corporate ? 'corporate' : 'customers'] });
+
+app.get('/v1/interstate/catalog', (_req, res) => res.json(interstate.catalog()));
+
+app.get('/v1/interstate/vendors', (_req, res) => res.json({
+  vendorTypes: interstate.vendorTypes,
+  verificationSteps: interstate.verificationSteps,
+  active: interstate.activeVendors({ country: 'NG' }).map((v) => ({ vendorId: v.vendorId, type: v.type })),
+}));
+
+app.post('/v1/interstate/vendors', (req, res) => {
+  const b = req.body ?? {};
+  if (!b.vendorId || !b.type) return problem(res, 422, 'VALIDATION_FAILED', 'vendorId and type required (trucking_company|fleet_operator|independent_truck_owner|freight_broker|warehouse_operator|cold_chain_operator|distribution_company)');
+  const v = interstate.registerVendor(String(b.vendorId), b.type);
+  if (b.approveAll === true) for (const s of interstate.verificationSteps) interstate.decideVerification(String(b.vendorId), s, 'approved', String(b.by ?? 'admin_1'));
+  res.status(201).json({ vendor: { vendorId: v.vendorId, type: v.type, steps: v.steps, active: v.active() } });
+});
+
+app.post('/v1/interstate/vendors/:id/verification', (req, res) => {
+  const b = req.body ?? {};
+  if (!b.step || !['approved', 'rejected'].includes(b.status)) return problem(res, 422, 'VALIDATION_FAILED', 'step + status(approved|rejected) required');
+  try {
+    const v = interstate.decideVerification(req.params.id, b.step, b.status, String(b.by ?? 'admin_1'));
+    res.json({ vendor: { vendorId: v.vendorId, steps: v.steps, active: v.active() } });
+  } catch (e: any) { return problem(res, 404, 'NOT_FOUND', e.message); }
+});
+
+app.post('/v1/interstate/quote', (req, res) => {
+  const b = req.body ?? {};
+  if (!b.service || !b.cargo?.weightKg || !b.originState || !b.destinationState) {
+    return problem(res, 422, 'VALIDATION_FAILED', 'service, cargo.weightKg, originState, destinationState required');
+  }
+  try {
+    const q = interstate.quote({
+      service: b.service, cargo: b.cargo, distanceKm: Number(b.distanceKm ?? haversineKm(6.5244, 3.3792, 9.0765, 7.3986)),
+      originState: b.originState, destinationState: b.destinationState,
+      option: b.option, urgency: b.urgency, routeSecurityRisk: b.routeSecurityRisk,
+    }, ilstCtx(b));
+    res.json(q);
+  } catch (e: any) { return problem(res, 403, 'FEATURE_DISABLED', e.message); }
+});
+
+app.post('/v1/interstate/recommend', (req, res) => {
+  const b = req.body ?? {};
+  if (!b.candidates?.length || !b.conditions) return problem(res, 422, 'VALIDATION_FAILED', 'candidates[] and conditions required');
+  try {
+    res.json(interstate.recommend({ service: b.service, cargo: b.cargo, distanceKm: b.distanceKm, originState: b.originState, destinationState: b.destinationState, urgency: b.urgency, candidates: b.candidates, conditions: b.conditions }, ilstCtx(b)));
+  } catch (e: any) { return problem(res, 403, 'FEATURE_DISABLED', e.message); }
+});
+
+app.post('/v1/interstate/book', (req, res) => {
+  const b = req.body ?? {};
+  if (!b.service || !b.vendorId || !b.cargo?.weightKg || !b.stops?.length) {
+    return problem(res, 422, 'VALIDATION_FAILED', 'service, vendorId, cargo.weightKg, stops[] required');
+  }
+  try {
+    const distanceKm = Number(b.distanceKm ?? 500);
+    const quote = b.quote ?? interstate.quote({ service: b.service, cargo: b.cargo, distanceKm, originState: b.originState ?? 'NG-LAG', destinationState: b.destinationState ?? 'NG-FCT', option: b.option }, ilstCtx(b));
+    const s = interstate.book({
+      quote, vendorId: b.vendorId, cargo: b.cargo, service: b.service, stops: b.stops,
+      customerId: b.customerId ?? 'cus_anon', corporateAccountId: b.corporateAccountId,
+      option: b.option ?? 'instant', scheduledFor: b.scheduledFor ? new Date(b.scheduledFor) : undefined,
+      recurrence: b.recurrence, plate: b.plate, paymentMode: b.paymentMode ?? 'escrow',
+      insured: b.insured, insurancePolicy: b.insurancePolicy,
+    }, ilstCtx(b));
+    res.status(201).json({ shipment: s });
+  } catch (e: any) { return problem(res, 403, 'BOOKING_REFUSED', e.message); }
+});
+
+app.get('/v1/interstate/shipments', (req, res) => res.json({
+  shipments: interstate.list({ customerId: req.query.customerId as string, vendorId: req.query.vendorId as string, status: req.query.status as any }),
+}));
+
+app.get('/v1/interstate/shipments/:id', (req, res) => {
+  const s = interstate.shipment(req.params.id);
+  if (!s) return problem(res, 404, 'NOT_FOUND', 'Shipment not found');
+  res.json({ shipment: s });
+});
+
+app.post('/v1/interstate/shipments/:id/status', (req, res) => {
+  const b = req.body ?? {};
+  try {
+    if (b.to === 'cargo_loaded') res.json({ shipment: interstate.markLoaded(req.params.id) });
+    else if (b.to === 'cancelled') res.json({ shipment: interstate.cancel(req.params.id) });
+    else if (b.to === 'completed') res.json(interstate.complete(req.params.id));
+    else res.json({ shipment: interstate.marketplace.advance(req.params.id, b.to) });
+  } catch (e: any) { return problem(res, 422, 'ILLEGAL_TRANSITION', e.message); }
+});
+
+app.post('/v1/interstate/shipments/:id/checkpoint', (req, res) => {
+  const b = req.body ?? {};
+  try {
+    res.status(201).json(interstate.checkpoint(req.params.id, { lat: b.lat, lng: b.lng, label: b.label ?? 'Checkpoint', note: b.note, outsideGeofence: b.outsideGeofence, sealBroken: b.sealBroken }));
+  } catch (e: any) { return problem(res, 422, 'CHECKPOINT_FAILED', e.message); }
+});
+
+app.post('/v1/interstate/shipments/:id/proof', (req, res) => {
+  const b = req.body ?? {};
+  if (!['pickup', 'delivery'].includes(b.type) || !b.photos?.length || !b.signedBy) {
+    return problem(res, 422, 'VALIDATION_FAILED', 'type(pickup|delivery), photos[], signedBy required');
+  }
+  try {
+    res.status(201).json({ proof: interstate.proof(req.params.id, b.type, b.photos, b.signedBy, b.signature ?? `sig:sha256:${Date.now()}`) });
+  } catch (e: any) { return problem(res, 422, 'PROOF_FAILED', e.message); }
+});
+
+app.post('/v1/interstate/shipments/:id/tracking-link', (req, res) => {
+  const b = req.body ?? {};
+  if (!b.recipient) return problem(res, 422, 'VALIDATION_FAILED', 'recipient required');
+  res.json({ link: interstate.trackingLink(req.params.id, String(b.recipient), Number(b.ttlHours ?? 72)) });
+});
+
+app.post('/v1/interstate/shipments/:id/rate', (req, res) => {
+  const b = req.body ?? {};
+  res.json({ shipment: interstate.marketplace.rate(req.params.id, Number(b.score ?? 5), b.comment) });
+});
+
+app.post('/v1/interstate/corporate/accounts', (req, res) => {
+  const b = req.body ?? {};
+  if (!b.accountId || !b.departments?.length) return problem(res, 422, 'VALIDATION_FAILED', 'accountId and departments[] required');
+  res.status(201).json({ account: interstate.corporate.createAccount(String(b.accountId), b.name ?? b.accountId, b.departments) });
+});
+
+app.post('/v1/interstate/corporate/requests', (req, res) => {
+  const b = req.body ?? {};
+  try {
+    res.status(201).json({ request: interstate.corporate.raiseRequest({ accountId: b.accountId, departmentCode: b.departmentCode, requestedBy: b.requestedBy, service: b.service, originState: b.originState, destState: b.destState, estimatedMinor: b.estimatedMinor, note: b.note }) });
+  } catch (e: any) { return problem(res, 422, 'CORPORATE_REFUSED', e.message); }
+});
+
+app.post('/v1/interstate/corporate/requests/:id/decide', (req, res) => {
+  const b = req.body ?? {};
+  if (!['approved', 'rejected'].includes(b.decision)) return problem(res, 422, 'VALIDATION_FAILED', 'decision(approved|rejected) required');
+  try {
+    res.json({ request: interstate.corporate.decide(req.params.id, String(b.approver), b.decision) });
+  } catch (e: any) { return problem(res, 422, 'APPROVAL_REFUSED', e.message); }
+});
+
+app.get('/v1/interstate/analytics', (_req, res) => res.json(interstate.analytics(
+  [
+    { category: 'heavy_truck', utilizationPct: 82 }, { category: 'articulated_trailer', utilizationPct: 64 },
+    { category: 'refrigerated_truck', utilizationPct: 71 }, { category: 'box_truck', utilizationPct: 77 },
+  ],
+  { avgHealthPct: 88, maintenanceDue: 3 },
+)));
 
 // ─── WhatsApp Smart AI Customer Service Platform (docs/26) ──────────────────
 app.get('/webhooks/whatsapp', wa.verifyWebhook);

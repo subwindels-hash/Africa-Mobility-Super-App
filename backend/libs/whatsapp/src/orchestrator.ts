@@ -201,6 +201,14 @@ async function routeInbound(msg: InboundMessage): Promise<OutboundMessage> {
   return route(msg.from, session, nlu, text);
 }
 
+// ── Interstate logistics bridge (docs/32 §whatsapp) ────────────────────────
+export interface InterstateBridge {
+  handle(phone: string, session: WaSession, nlu: NluResult, rawText: string): OutboundMessage;
+}
+let interstateBridge: InterstateBridge | null = null;
+/** Wire the interstate logistics system into Ada (called by the API layer). */
+export function setInterstateBridge(b: InterstateBridge | null) { interstateBridge = b; }
+
 async function route(phone: string, session: WaSession, nlu: NluResult, rawText: string): Promise<OutboundMessage> {
   const meta = { intent: nlu.intent, confidence: nlu.confidence, node: session.node };
 
@@ -235,6 +243,13 @@ async function route(phone: string, session: WaSession, nlu: NluResult, rawText:
   }
 
   switch (nlu.intent) {
+    case 'book_interstate':
+    case 'track_shipment': {
+      stats.aiResolved++;
+      if (interstateBridge) return interstateBridge.handle(phone, session, nlu, rawText);
+      return { to: phone, text: '🚚 Interstate logistics: send cargo details like *"20 tonnes of cement Lagos → Kano"* and I\'ll quote verified freight partners.', meta };
+    }
+
     case 'greeting': {
       session.node = 'greeting';
       stats.aiResolved++;
