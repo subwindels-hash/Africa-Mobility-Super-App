@@ -9,7 +9,7 @@
 CREATE SCHEMA IF NOT EXISTS organism;
 
 -- 1) Fleet topology — the canonical 8-layer / 120,000+ agent manifest
-CREATE TABLE organism.agent_fleets (
+CREATE TABLE IF NOT EXISTS organism.agent_fleets (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   layer TEXT NOT NULL CHECK (layer IN ('data_analysis','executive','security','operations','automation','product','orchestration','evolution')),
   layer_name TEXT NOT NULL,
@@ -20,10 +20,10 @@ CREATE TABLE organism.agent_fleets (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (layer, sub_swarm)
 );
-CREATE INDEX idx_organism_fleets_layer ON organism.agent_fleets(layer);
+CREATE INDEX IF NOT EXISTS idx_organism_fleets_layer ON organism.agent_fleets(layer);
 
 -- 2) Cognition pulses — one row per full intelligence cycle
-CREATE TABLE organism.pulses (
+CREATE TABLE IF NOT EXISTS organism.pulses (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   pulse_key TEXT UNIQUE NOT NULL,               -- pulse_42 (engine handle)
   ts TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -35,10 +35,10 @@ CREATE TABLE organism.pulses (
   experiments INT NOT NULL DEFAULT 0,
   tunables_after JSONB NOT NULL DEFAULT '{}'
 );
-CREATE INDEX idx_organism_pulses_ts ON organism.pulses(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_organism_pulses_ts ON organism.pulses(ts DESC);
 
 -- 3) Shared intelligence graph — nodes (the cognitive substrate)
-CREATE TABLE organism.graph_nodes (
+CREATE TABLE IF NOT EXISTS organism.graph_nodes (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   node_key TEXT UNIQUE NOT NULL,                -- kpi:demand, city:NG-LAG, threat:platform
   kind TEXT NOT NULL CHECK (kind IN ('service','city','vertical','customer','vendor','payment','threat','infrastructure','model','kpi')),
@@ -48,10 +48,10 @@ CREATE TABLE organism.graph_nodes (
   observations INT NOT NULL DEFAULT 0,
   last_seen TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_organism_nodes_weight ON organism.graph_nodes(weight DESC);
+CREATE INDEX IF NOT EXISTS idx_organism_nodes_weight ON organism.graph_nodes(weight DESC);
 
 -- 4) Graph observations — every agent contribution
-CREATE TABLE organism.graph_observations (
+CREATE TABLE IF NOT EXISTS organism.graph_observations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   ts TIMESTAMPTZ NOT NULL DEFAULT now(),
   layer TEXT NOT NULL,
@@ -62,10 +62,10 @@ CREATE TABLE organism.graph_observations (
   direction TEXT NOT NULL CHECK (direction IN ('up','down','flat')),
   payload JSONB NOT NULL DEFAULT '{}'
 );
-CREATE INDEX idx_organism_obs_node ON organism.graph_observations(node_key, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_organism_obs_node ON organism.graph_observations(node_key, ts DESC);
 
 -- 5) Executive decisions (AI board output, governance-validated)
-CREATE TABLE organism.executive_decisions (
+CREATE TABLE IF NOT EXISTS organism.executive_decisions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   decision_key TEXT UNIQUE NOT NULL,
   pulse_id UUID REFERENCES organism.pulses(id),
@@ -80,10 +80,10 @@ CREATE TABLE organism.executive_decisions (
   validated BOOLEAN NOT NULL DEFAULT TRUE,      -- Data Governance sign-off
   flags TEXT[] NOT NULL DEFAULT '{}'
 );
-CREATE INDEX idx_organism_decisions_priority ON organism.executive_decisions(priority, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_organism_decisions_priority ON organism.executive_decisions(priority, ts DESC);
 
 -- 6) Orchestrated tasks + execution results
-CREATE TABLE organism.execution_tasks (
+CREATE TABLE IF NOT EXISTS organism.execution_tasks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   task_key TEXT UNIQUE NOT NULL,
   decision_id UUID REFERENCES organism.executive_decisions(id),
@@ -98,10 +98,10 @@ CREATE TABLE organism.execution_tasks (
   duration_ms INT,
   executed_at TIMESTAMPTZ
 );
-CREATE INDEX idx_organism_tasks_status ON organism.execution_tasks(status, executed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_organism_tasks_status ON organism.execution_tasks(status, executed_at DESC);
 
 -- 7) Evolution experiments (meta-learning / self-improvement / simulation / modeling)
-CREATE TABLE organism.evolution_experiments (
+CREATE TABLE IF NOT EXISTS organism.evolution_experiments (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   experiment_key TEXT UNIQUE NOT NULL,
   ts TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -116,7 +116,7 @@ CREATE TABLE organism.evolution_experiments (
 );
 
 -- 8) Organism tunables — the live, evolution-managed configuration
-CREATE TABLE organism.tunables (
+CREATE TABLE IF NOT EXISTS organism.tunables (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   latency_threshold_ms INT NOT NULL DEFAULT 800,
   cost_budget_pct NUMERIC(4,2) NOT NULL DEFAULT 0.62,

@@ -15,7 +15,7 @@
 -- ============================================================================
 
 -- 1) Country-level activation (spec table)
-CREATE TABLE fams.country_services (
+CREATE TABLE IF NOT EXISTS fams.country_services (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   country_code CHAR(2) NOT NULL REFERENCES geo.countries(code),
   service_code TEXT NOT NULL REFERENCES fams.services(code),
@@ -29,10 +29,10 @@ CREATE TABLE fams.country_services (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (country_code, service_code)
 );
-CREATE INDEX idx_fams_country_svc ON fams.country_services(country_code, service_code);
+CREATE INDEX IF NOT EXISTS idx_fams_country_svc ON fams.country_services(country_code, service_code);
 
 -- 2) State-level activation (spec table)
-CREATE TABLE fams.state_services (
+CREATE TABLE IF NOT EXISTS fams.state_services (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   state_code TEXT NOT NULL REFERENCES fams.states(code),
   service_code TEXT NOT NULL REFERENCES fams.services(code),
@@ -46,10 +46,10 @@ CREATE TABLE fams.state_services (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (state_code, service_code)
 );
-CREATE INDEX idx_fams_state_svc ON fams.state_services(state_code, service_code);
+CREATE INDEX IF NOT EXISTS idx_fams_state_svc ON fams.state_services(state_code, service_code);
 
 -- 3) City-level activation (spec table)
-CREATE TABLE fams.city_services (
+CREATE TABLE IF NOT EXISTS fams.city_services (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   city_code TEXT NOT NULL REFERENCES geo.cities(code),
   service_code TEXT NOT NULL REFERENCES fams.services(code),
@@ -64,10 +64,10 @@ CREATE TABLE fams.city_services (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (city_code, service_code)
 );
-CREATE INDEX idx_fams_city_svc ON fams.city_services(city_code, service_code);
+CREATE INDEX IF NOT EXISTS idx_fams_city_svc ON fams.city_services(city_code, service_code);
 
 -- 4) Activation logs (spec table; fams.audit_log stays for the 004 flows)
-CREATE TABLE fams.activation_logs (
+CREATE TABLE IF NOT EXISTS fams.activation_logs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   actor_id UUID NOT NULL,
   actor_role TEXT NOT NULL,                      -- super_admin | admin | scheduler | system
@@ -81,17 +81,19 @@ CREATE TABLE fams.activation_logs (
   request_ip INET,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_fams_act_logs_service ON fams.activation_logs(service_code, created_at DESC);
-CREATE INDEX idx_fams_act_logs_actor ON fams.activation_logs(actor_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fams_act_logs_service ON fams.activation_logs(service_code, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fams_act_logs_actor ON fams.activation_logs(actor_id, created_at DESC);
 
 -- 5) Vendor lifecycle: add 'disabled' (Active/Suspended/Pending Review/
 --    Maintenance/Disabled per spec)
+ALTER TABLE fams.vendor_activation DROP CONSTRAINT IF EXISTS vendor_activation_state_check;
 ALTER TABLE fams.vendor_activation DROP CONSTRAINT IF EXISTS vendor_activation_state_check;
 ALTER TABLE fams.vendor_activation ADD CONSTRAINT vendor_activation_state_check
   CHECK (state IN ('active','suspended','pending_review','maintenance','disabled'));
 
 -- 6) Asset classes: spec list — cars, motorcycles, dispatch bikes,
 --    helicopters, private jets, charter aircraft, boats, yachts
+ALTER TABLE fams.asset_activation DROP CONSTRAINT IF EXISTS asset_activation_asset_type_check;
 ALTER TABLE fams.asset_activation DROP CONSTRAINT IF EXISTS asset_activation_asset_type_check;
 ALTER TABLE fams.asset_activation ADD CONSTRAINT asset_activation_asset_type_check
   CHECK (asset_type IN ('car','vehicle','motorcycle','dispatch_bike','helicopter','private_jet','jet','charter_aircraft','boat','yacht'));
@@ -101,7 +103,7 @@ INSERT INTO fams.services (code, kind, parent_code, name, icon, default_value, p
   ('module.taxi','module','module.transportation','Taxi Services','🚕','on',1,12),
   ('module.dispatch','module','module.logistics','Dispatch Services','🛵','on',1,22),
   ('module.delivery','module','module.logistics','Delivery','📮','on',1,24),
-  ('module.accommodation','module','module.accommodation','Accommodation','🏡','on',2,62),
+  ('module.accommodation_sub','module','module.accommodation','Accommodation','🏡','on',2,62),
   ('module.ai_features','module',NULL,'AI Features','🧠','on',1,142),
   ('module.video_calls','module',NULL,'Video Calls','📹','on',2,150),
   ('module.voice_calls','module',NULL,'Voice Calls','📞','on',1,155),

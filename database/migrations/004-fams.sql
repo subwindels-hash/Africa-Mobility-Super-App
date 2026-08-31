@@ -19,7 +19,7 @@ CREATE SCHEMA IF NOT EXISTS fams;
 
 -- 1) Service registry — every platform module / vertical / category, built
 --    from day one; visibility controlled here, never by shipping code.
-CREATE TABLE fams.services (
+CREATE TABLE IF NOT EXISTS fams.services (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   code TEXT UNIQUE NOT NULL,                     -- vertical.transportation, module.wallet, ride.vip
   kind TEXT NOT NULL CHECK (kind IN ('module','vertical','category','feature')),
@@ -34,7 +34,7 @@ CREATE TABLE fams.services (
 );
 
 -- 2) States (sub-country layer between geo.countries and geo.cities)
-CREATE TABLE fams.states (
+CREATE TABLE IF NOT EXISTS fams.states (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   code TEXT UNIQUE NOT NULL,                     -- NG-LAG, NG-ED (Edo), KE-NAI...
   country_code CHAR(2) NOT NULL REFERENCES geo.countries(code),
@@ -42,11 +42,11 @@ CREATE TABLE fams.states (
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_fams_states_country ON fams.states(country_code);
+CREATE INDEX IF NOT EXISTS idx_fams_states_country ON fams.states(country_code);
 
 -- 3) Feature flags — engine-native rules (richer than platform.feature_flags):
 --    scope level/selector, time window, geofence, rollout %, user groups.
-CREATE TABLE fams.feature_flags (
+CREATE TABLE IF NOT EXISTS fams.feature_flags (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   service_code TEXT NOT NULL REFERENCES fams.services(code),
   level TEXT NOT NULL DEFAULT 'global' CHECK (level IN ('global','country','state','city','category','vendor','asset')),
@@ -63,11 +63,11 @@ CREATE TABLE fams.feature_flags (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_fams_flags_service ON fams.feature_flags(service_code);
-CREATE INDEX idx_fams_flags_level_sel ON fams.feature_flags(level, selector);
+CREATE INDEX IF NOT EXISTS idx_fams_flags_service ON fams.feature_flags(service_code);
+CREATE INDEX IF NOT EXISTS idx_fams_flags_level_sel ON fams.feature_flags(level, selector);
 
 -- 4) Service availability — location gates (country/state/city) for services
-CREATE TABLE fams.service_availability (
+CREATE TABLE IF NOT EXISTS fams.service_availability (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   service_code TEXT NOT NULL REFERENCES fams.services(code),
   level TEXT NOT NULL CHECK (level IN ('global','country','state','city')),
@@ -82,10 +82,10 @@ CREATE TABLE fams.service_availability (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (service_code, level, selector)
 );
-CREATE INDEX idx_fams_avail_lookup ON fams.service_availability(service_code, selector);
+CREATE INDEX IF NOT EXISTS idx_fams_avail_lookup ON fams.service_availability(service_code, selector);
 
 -- 5) Phased rollouts & user-group activation (customers/vendors/corporate/beta/vip)
-CREATE TABLE fams.feature_rollouts (
+CREATE TABLE IF NOT EXISTS fams.feature_rollouts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   service_code TEXT NOT NULL REFERENCES fams.services(code),
   phase INT NOT NULL CHECK (phase BETWEEN 1 AND 5),
@@ -100,7 +100,7 @@ CREATE TABLE fams.feature_rollouts (
 );
 
 -- 6) Vendor activation — Active / Suspended / Pending Review / Maintenance
-CREATE TABLE fams.vendor_activation (
+CREATE TABLE IF NOT EXISTS fams.vendor_activation (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   vendor_id UUID NOT NULL REFERENCES vendor.vendors(id),
   vendor_code TEXT UNIQUE NOT NULL,              -- vnd_a, vnd_b (engine key)
@@ -113,11 +113,11 @@ CREATE TABLE fams.vendor_activation (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_fams_vendor_state ON fams.vendor_activation(state);
+CREATE INDEX IF NOT EXISTS idx_fams_vendor_state ON fams.vendor_activation(state);
 
 -- 7) Asset activation — vehicle / motorcycle / helicopter / jet / boat, per
 --    asset class or a single asset instance
-CREATE TABLE fams.asset_activation (
+CREATE TABLE IF NOT EXISTS fams.asset_activation (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   asset_code TEXT UNIQUE NOT NULL,               -- ast_jet_b, or class 'helicopter'
   asset_type TEXT NOT NULL CHECK (asset_type IN ('vehicle','motorcycle','helicopter','jet','boat')),
@@ -134,7 +134,7 @@ CREATE TABLE fams.asset_activation (
 );
 
 -- 8) Scheduled activations — time-based control (cron applies due rows)
-CREATE TABLE fams.scheduled_activations (
+CREATE TABLE IF NOT EXISTS fams.scheduled_activations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   action TEXT NOT NULL DEFAULT 'set_value' CHECK (action IN ('set_value','emergency_stop','emergency_clear')),
   service_code TEXT NOT NULL REFERENCES fams.services(code),
@@ -147,10 +147,10 @@ CREATE TABLE fams.scheduled_activations (
   created_by UUID,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_fams_sched_due ON fams.scheduled_activations(executed_at, run_at);
+CREATE INDEX IF NOT EXISTS idx_fams_sched_due ON fams.scheduled_activations(executed_at, run_at);
 
 -- 9) Emergency stops — kill switch (no deploy; overrides every rule)
-CREATE TABLE fams.emergency_stops (
+CREATE TABLE IF NOT EXISTS fams.emergency_stops (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   target_key TEXT UNIQUE NOT NULL,               -- 'vertical:aviation', 'module:wallet'
   reason TEXT NOT NULL,
@@ -160,7 +160,7 @@ CREATE TABLE fams.emergency_stops (
 );
 
 -- 10) FAMS audit log — every activation change is trail-logged (compliance)
-CREATE TABLE fams.audit_log (
+CREATE TABLE IF NOT EXISTS fams.audit_log (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   actor_id UUID NOT NULL,
   actor_role TEXT NOT NULL,
@@ -170,7 +170,7 @@ CREATE TABLE fams.audit_log (
   after JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_fams_audit_target ON fams.audit_log(target, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_fams_audit_target ON fams.audit_log(target, created_at DESC);
 
 -- Seed the service registry (18 platform modules + 8 verticals; categories
 -- live in platform.service_categories since 001 and are referenced by code).
@@ -235,7 +235,7 @@ ON CONFLICT (service_code, level, selector) DO NOTHING;
 -- Seed feature flags: VIP ride maintenance + next-gen AI beta/vip-only
 INSERT INTO fams.feature_flags (service_code, level, selector, value, note) VALUES
   ('ride.vip','category','ride.vip','maintenance','Fleet maintenance window'),
-  ('ai.assistant_next_gen','feature',NULL,'beta','Next-gen assistant: beta + vip only')
+  ('ai.assistant_next_gen','global','__global__','beta','Next-gen assistant: beta + vip only')
 ON CONFLICT DO NOTHING;
 
 INSERT INTO fams.feature_rollouts (service_code, phase, user_groups, rollout_pct, countries, starts_at, ends_at) VALUES
@@ -247,4 +247,5 @@ ON CONFLICT DO NOTHING;
 
 INSERT INTO fams.scheduled_activations (action, service_code, level, selector, value, run_at, note) VALUES
   ('set_value','vertical.travel','country','GH','on','2027-01-01T00:00:00Z','Ghana flights go-live'),
-  ('emergency_clear','vertical.travel',NULL,NULL,NULL,'2027-01-31T23:59:59Z','Clear demo travel stop');
+  ('emergency_clear','vertical.travel','global','__global__',NULL,'2027-01-31T23:59:59Z','Clear demo travel stop')
+ON CONFLICT DO NOTHING;

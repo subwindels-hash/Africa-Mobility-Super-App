@@ -9,11 +9,14 @@
 
 -- 0) FAMS: extend activation levels with road-zone / fleet / vehicle scope
 ALTER TABLE fams.feature_flags DROP CONSTRAINT IF EXISTS feature_flags_level_check;
+ALTER TABLE fams.feature_flags DROP CONSTRAINT IF EXISTS feature_flags_level_check;
 ALTER TABLE fams.feature_flags ADD CONSTRAINT feature_flags_level_check
   CHECK (level IN ('global','country','state','city','road_zone','category','vendor','fleet','vehicle','asset'));
 ALTER TABLE fams.service_availability DROP CONSTRAINT IF EXISTS service_availability_level_check;
+ALTER TABLE fams.service_availability DROP CONSTRAINT IF EXISTS service_availability_level_check;
 ALTER TABLE fams.service_availability ADD CONSTRAINT service_availability_level_check
   CHECK (level IN ('global','country','state','city','road_zone'));
+ALTER TABLE fams.scheduled_activations DROP CONSTRAINT IF EXISTS scheduled_activations_level_check;
 ALTER TABLE fams.scheduled_activations DROP CONSTRAINT IF EXISTS scheduled_activations_level_check;
 ALTER TABLE fams.scheduled_activations ADD CONSTRAINT scheduled_activations_level_check
   CHECK (level IN ('global','country','state','city','road_zone','category','vendor','fleet','vehicle','asset'));
@@ -21,7 +24,7 @@ ALTER TABLE fams.scheduled_activations ADD CONSTRAINT scheduled_activations_leve
 CREATE SCHEMA IF NOT EXISTS mobility;
 
 -- 1) Fleets (fleet-level activation + fleet intelligence grouping)
-CREATE TABLE mobility.fleets (
+CREATE TABLE IF NOT EXISTS mobility.fleets (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   code TEXT UNIQUE NOT NULL,                    -- flt_1
   name TEXT NOT NULL,
@@ -30,7 +33,7 @@ CREATE TABLE mobility.fleets (
 );
 
 -- 2) Vehicles — every asset class, incl. future aircraft & marine
-CREATE TABLE mobility.vehicles (
+CREATE TABLE IF NOT EXISTS mobility.vehicles (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   code TEXT UNIQUE NOT NULL,                    -- AV-001
   cls TEXT NOT NULL CHECK (cls IN ('car','taxi','suv','chauffeur','delivery_bike','motorcycle','truck','bus','autonomous_vehicle','aircraft','marine')),
@@ -45,11 +48,11 @@ CREATE TABLE mobility.vehicles (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_mobility_vehicles_fleet ON mobility.vehicles(fleet_id);
-CREATE INDEX idx_mobility_vehicles_cls ON mobility.vehicles(cls, status);
+CREATE INDEX IF NOT EXISTS idx_mobility_vehicles_fleet ON mobility.vehicles(fleet_id);
+CREATE INDEX IF NOT EXISTS idx_mobility_vehicles_cls ON mobility.vehicles(cls, status);
 
 -- 3) Telemetry frames (Timescale hypertable candidate alongside telemetry.positions)
-CREATE TABLE mobility.vehicle_telemetry (
+CREATE TABLE IF NOT EXISTS mobility.vehicle_telemetry (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   ts TIMESTAMPTZ NOT NULL DEFAULT now(),
   vehicle_id UUID NOT NULL REFERENCES mobility.vehicles(id),
@@ -67,11 +70,11 @@ CREATE TABLE mobility.vehicle_telemetry (
   road_zone TEXT,                               -- zone:NG-LAG-EKO-ATLANTIC (road-zone activation)
   meta JSONB NOT NULL DEFAULT '{}'
 );
-CREATE INDEX idx_mobility_tel_vehicle ON mobility.vehicle_telemetry(vehicle_id, ts DESC);
-CREATE INDEX idx_mobility_tel_ts ON mobility.vehicle_telemetry(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_mobility_tel_vehicle ON mobility.vehicle_telemetry(vehicle_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_mobility_tel_ts ON mobility.vehicle_telemetry(ts DESC);
 
 -- 4) Monitoring & behaviour alerts (route deviation, stops, geofence, harsh events…)
-CREATE TABLE mobility.vehicle_events (
+CREATE TABLE IF NOT EXISTS mobility.vehicle_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   ts TIMESTAMPTZ NOT NULL DEFAULT now(),
   vehicle_id UUID NOT NULL REFERENCES mobility.vehicles(id),
@@ -80,20 +83,20 @@ CREATE TABLE mobility.vehicle_events (
   evidence TEXT[] NOT NULL DEFAULT '{}',
   reviewed BOOLEAN NOT NULL DEFAULT FALSE
 );
-CREATE INDEX idx_mobility_events_vehicle ON mobility.vehicle_events(vehicle_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_mobility_events_vehicle ON mobility.vehicle_events(vehicle_id, ts DESC);
 
 -- 5) Driver safety scores (behaviour analytics)
-CREATE TABLE mobility.driver_scores (
+CREATE TABLE IF NOT EXISTS mobility.driver_scores (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   driver_id UUID NOT NULL REFERENCES identity.users(id),
   score INT NOT NULL CHECK (score BETWEEN 0 AND 100),
   window_days INT NOT NULL DEFAULT 30,
   computed_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_mobility_driver_scores ON mobility.driver_scores(driver_id, computed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mobility_driver_scores ON mobility.driver_scores(driver_id, computed_at DESC);
 
 -- 6) Autonomy sessions (operating-mode lifecycle + supervision)
-CREATE TABLE mobility.autonomy_sessions (
+CREATE TABLE IF NOT EXISTS mobility.autonomy_sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   vehicle_id UUID NOT NULL REFERENCES mobility.vehicles(id),
   requested_mode TEXT NOT NULL CHECK (requested_mode IN ('manual','ai_assisted','supervised_autonomous','full_autonomous')),
@@ -104,10 +107,10 @@ CREATE TABLE mobility.autonomy_sessions (
   started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   ended_at TIMESTAMPTZ
 );
-CREATE INDEX idx_mobility_sessions_vehicle ON mobility.autonomy_sessions(vehicle_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_mobility_sessions_vehicle ON mobility.autonomy_sessions(vehicle_id, started_at DESC);
 
 -- 7) Route intelligence (multi-factor, vehicle-class aware)
-CREATE TABLE mobility.route_plans (
+CREATE TABLE IF NOT EXISTS mobility.route_plans (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   vehicle_id UUID REFERENCES mobility.vehicles(id),
   booking_id UUID,
@@ -119,7 +122,7 @@ CREATE TABLE mobility.route_plans (
 );
 
 -- 8) Autonomous trips (ride-hailing pipeline)
-CREATE TABLE mobility.autonomous_trips (
+CREATE TABLE IF NOT EXISTS mobility.autonomous_trips (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   booking_id UUID,
   vehicle_id UUID NOT NULL REFERENCES mobility.vehicles(id),
@@ -131,7 +134,7 @@ CREATE TABLE mobility.autonomous_trips (
 );
 
 -- 9) Autonomous deliveries (delivery pipeline)
-CREATE TABLE mobility.autonomous_deliveries (
+CREATE TABLE IF NOT EXISTS mobility.autonomous_deliveries (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   booking_id UUID,
   vehicle_id UUID REFERENCES mobility.vehicles(id),
@@ -143,7 +146,7 @@ CREATE TABLE mobility.autonomous_deliveries (
 );
 
 -- 10) Safety events & responses
-CREATE TABLE mobility.safety_events (
+CREATE TABLE IF NOT EXISTS mobility.safety_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   ts TIMESTAMPTZ NOT NULL DEFAULT now(),
   vehicle_id UUID REFERENCES mobility.vehicles(id),
@@ -153,10 +156,10 @@ CREATE TABLE mobility.safety_events (
   immobilized BOOLEAN NOT NULL DEFAULT FALSE,   -- only where supported AND legally permitted
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_mobility_safety_ts ON mobility.safety_events(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_mobility_safety_ts ON mobility.safety_events(ts DESC);
 
 -- 11) Vehicle command audit (cybersecurity — signed, authorized commands only)
-CREATE TABLE mobility.vehicle_commands (
+CREATE TABLE IF NOT EXISTS mobility.vehicle_commands (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   ts TIMESTAMPTZ NOT NULL DEFAULT now(),
   vehicle_id UUID REFERENCES mobility.vehicles(id),
@@ -167,10 +170,10 @@ CREATE TABLE mobility.vehicle_commands (
   shield_threat UUID,                           -- link to shield.threats when escalated
   auth_model JSONB NOT NULL DEFAULT '{}'
 );
-CREATE INDEX idx_mobility_commands_vehicle ON mobility.vehicle_commands(vehicle_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_mobility_commands_vehicle ON mobility.vehicle_commands(vehicle_id, ts DESC);
 
 -- 12) Road zones (sub-city activation scope + geofence)
-CREATE TABLE mobility.road_zones (
+CREATE TABLE IF NOT EXISTS mobility.road_zones (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   code TEXT UNIQUE NOT NULL,                    -- zone:NG-LAG-EKO-ATLANTIC
   name TEXT NOT NULL,
@@ -180,7 +183,7 @@ CREATE TABLE mobility.road_zones (
   supervised_autonomy_pilot BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_mobility_zones_geom ON mobility.road_zones USING GIST(boundary);
+CREATE INDEX IF NOT EXISTS idx_mobility_zones_geom ON mobility.road_zones USING GIST(boundary);
 
 -- Seed: FAMS autonomous-mobility features (spec §15 examples)
 INSERT INTO fams.services (code, kind, parent_code, name, icon, default_value, phase, sort_order) VALUES

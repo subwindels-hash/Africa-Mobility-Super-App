@@ -8,7 +8,7 @@
 CREATE SCHEMA IF NOT EXISTS interstate;
 
 -- 1) Freight vehicle catalog (14 categories; platform-wide reference data)
-CREATE TABLE interstate.vehicle_categories (
+CREATE TABLE IF NOT EXISTS interstate.vehicle_categories (
   category TEXT PRIMARY KEY,                        -- heavy_truck, refrigerated_truck…
   label TEXT NOT NULL,
   capacity_kg INT NOT NULL CHECK (capacity_kg > 0),
@@ -20,7 +20,7 @@ CREATE TABLE interstate.vehicle_categories (
 );
 
 -- 2) Vendor fleet units — capacity/dimensions/insurance/maintenance/availability/regions
-CREATE TABLE interstate.freight_vehicles (
+CREATE TABLE IF NOT EXISTS interstate.freight_vehicles (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   vendor_id UUID NOT NULL REFERENCES vendor.vendors(id),
   category TEXT NOT NULL REFERENCES interstate.vehicle_categories(category),
@@ -39,11 +39,11 @@ CREATE TABLE interstate.freight_vehicles (
   status TEXT NOT NULL DEFAULT 'available' CHECK (status IN ('available','on_haul','maintenance','retired')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_ilst_vehicles_vendor ON interstate.freight_vehicles(vendor_id, status);
-CREATE INDEX idx_ilst_vehicles_avail ON interstate.freight_vehicles USING GIST(availability_calendar);
+CREATE INDEX IF NOT EXISTS idx_ilst_vehicles_vendor ON interstate.freight_vehicles(vendor_id, status);
+CREATE INDEX IF NOT EXISTS idx_ilst_vehicles_avail ON interstate.freight_vehicles USING GIST(availability_calendar);
 
 -- 3) Vendor verification chain (7 steps; compliance_approval is the final gate)
-CREATE TABLE interstate.vendor_verifications (
+CREATE TABLE IF NOT EXISTS interstate.vendor_verifications (
   vendor_id UUID PRIMARY KEY REFERENCES vendor.vendors(id),
   vendor_type TEXT NOT NULL CHECK (vendor_type IN ('trucking_company','fleet_operator','independent_truck_owner','freight_broker','warehouse_operator','cold_chain_operator','distribution_company')),
   business_verification TEXT NOT NULL DEFAULT 'pending' CHECK (business_verification IN ('pending','approved','rejected')),
@@ -62,7 +62,7 @@ CREATE TABLE interstate.vendor_verifications (
 );
 
 -- 4) Shipments (cargo, stops, status, vehicle/driver, ETA, delivery confirmation)
-CREATE TABLE interstate.shipments (
+CREATE TABLE IF NOT EXISTS interstate.shipments (
   id TEXT PRIMARY KEY,                              -- shp_1
   service TEXT NOT NULL CHECK (service IN ('ftl','ltl','shared_cargo','bulk_cargo','container','cold_chain','heavy_equipment','construction_material','agricultural_produce','fmcg','manufacturing','warehouse_to_warehouse','b2b','b2c','government','ngo_humanitarian','medical_pharma','ecommerce_line_haul','livestock','vehicle_transport','machinery')),
   customer_id UUID NOT NULL REFERENCES identity.users(id),
@@ -80,7 +80,7 @@ CREATE TABLE interstate.shipments (
   status TEXT NOT NULL DEFAULT 'quote_requested' CHECK (status IN ('quote_requested','quote_accepted','awaiting_pickup','driver_assigned','cargo_loaded','in_transit','checkpoint_update','delivered','completed','cancelled','disputed')),
   quote_minor BIGINT,
   payment_mode TEXT CHECK (payment_mode IN ('instant','escrow','corporate_billing','partial','milestone')),
-  escrow_id UUID REFERENCES wallet.escrow_holds(id),
+  escrow_id UUID REFERENCES money.escrow_holds(id),
   settled_minor BIGINT,
   eta_at TIMESTAMPTZ,
   current_lat DOUBLE PRECISION, current_lng DOUBLE PRECISION,
@@ -89,12 +89,12 @@ CREATE TABLE interstate.shipments (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_ilst_shipments_customer ON interstate.shipments(customer_id, created_at DESC);
-CREATE INDEX idx_ilst_shipments_vendor ON interstate.shipments(vendor_id, status);
-CREATE INDEX idx_ilst_shipments_status ON interstate.shipments(status) WHERE status NOT IN ('completed','cancelled');
+CREATE INDEX IF NOT EXISTS idx_ilst_shipments_customer ON interstate.shipments(customer_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ilst_shipments_vendor ON interstate.shipments(vendor_id, status);
+CREATE INDEX IF NOT EXISTS idx_ilst_shipments_status ON interstate.shipments(status) WHERE status NOT IN ('completed','cancelled');
 
 -- 5) Stops — single/multi pickup + single/multi destination
-CREATE TABLE interstate.shipment_stops (
+CREATE TABLE IF NOT EXISTS interstate.shipment_stops (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   shipment_id TEXT NOT NULL REFERENCES interstate.shipments(id) ON DELETE CASCADE,
   kind TEXT NOT NULL CHECK (kind IN ('pickup','dropoff')),
@@ -107,7 +107,7 @@ CREATE TABLE interstate.shipment_stops (
 );
 
 -- 6) Quote comparisons (multi-provider offers per request)
-CREATE TABLE interstate.quotes (
+CREATE TABLE IF NOT EXISTS interstate.quotes (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   shipment_id TEXT REFERENCES interstate.shipments(id),
   service TEXT NOT NULL,
@@ -124,7 +124,7 @@ CREATE TABLE interstate.quotes (
 );
 
 -- 7) Tracking events — GPS/checkpoints/ETA/geofence (route playback source)
-CREATE TABLE interstate.tracking_events (
+CREATE TABLE IF NOT EXISTS interstate.tracking_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   shipment_id TEXT NOT NULL REFERENCES interstate.shipments(id) ON DELETE CASCADE,
   ts TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -134,10 +134,10 @@ CREATE TABLE interstate.tracking_events (
   outside_geofence BOOLEAN NOT NULL DEFAULT FALSE,
   created_via TEXT NOT NULL DEFAULT 'telemetry' CHECK (created_via IN ('telemetry','checkpoint','whatsapp','driver_app'))
 );
-CREATE INDEX idx_ilst_tracking_playback ON interstate.tracking_events(shipment_id, ts);
+CREATE INDEX IF NOT EXISTS idx_ilst_tracking_playback ON interstate.tracking_events(shipment_id, ts);
 
 -- 8) Shareable tracking links (authorized recipients, TTL)
-CREATE TABLE interstate.tracking_links (
+CREATE TABLE IF NOT EXISTS interstate.tracking_links (
   token TEXT PRIMARY KEY,
   shipment_id TEXT NOT NULL REFERENCES interstate.shipments(id) ON DELETE CASCADE,
   recipient TEXT NOT NULL,
@@ -148,7 +148,7 @@ CREATE TABLE interstate.tracking_links (
 );
 
 -- 9) Cargo security — seals, tamper/geofence alerts, proofs & signatures
-CREATE TABLE interstate.cargo_inspections (
+CREATE TABLE IF NOT EXISTS interstate.cargo_inspections (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   shipment_id TEXT NOT NULL REFERENCES interstate.shipments(id) ON DELETE CASCADE,
   kind TEXT NOT NULL CHECK (kind IN ('seal_install','tamper_alert','geofence_alert','driver_identity_check','cargo_verification','proof_of_pickup','proof_of_delivery','photo_confirmation')),
@@ -160,10 +160,10 @@ CREATE TABLE interstate.cargo_inspections (
   detail TEXT,
   metadata JSONB NOT NULL DEFAULT '{}'
 );
-CREATE INDEX idx_ilst_inspections_shipment ON interstate.cargo_inspections(shipment_id, at DESC);
+CREATE INDEX IF NOT EXISTS idx_ilst_inspections_shipment ON interstate.cargo_inspections(shipment_id, at DESC);
 
 -- 10) Shipment insurance policies
-CREATE TABLE interstate.shipment_insurance (
+CREATE TABLE IF NOT EXISTS interstate.shipment_insurance (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   shipment_id TEXT NOT NULL REFERENCES interstate.shipments(id) ON DELETE CASCADE,
   policy_no TEXT NOT NULL,
@@ -174,14 +174,14 @@ CREATE TABLE interstate.shipment_insurance (
 );
 
 -- 11) Corporate logistics — accounts, departments, approvals, budgets
-CREATE TABLE interstate.corporate_accounts (
+CREATE TABLE IF NOT EXISTS interstate.corporate_accounts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   code TEXT UNIQUE NOT NULL,                        -- corp_dangote
   name TEXT NOT NULL,
   billing_type TEXT NOT NULL DEFAULT 'monthly_invoice' CHECK (billing_type IN ('monthly_invoice','prepaid','wallet')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE TABLE interstate.corporate_departments (
+CREATE TABLE IF NOT EXISTS interstate.corporate_departments (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id UUID NOT NULL REFERENCES interstate.corporate_accounts(id) ON DELETE CASCADE,
   code TEXT NOT NULL, name TEXT NOT NULL,
@@ -189,12 +189,12 @@ CREATE TABLE interstate.corporate_departments (
   spent_minor BIGINT NOT NULL DEFAULT 0,
   UNIQUE (account_id, code)
 );
-CREATE TABLE interstate.corporate_approvers (
+CREATE TABLE IF NOT EXISTS interstate.corporate_approvers (
   department_id UUID NOT NULL REFERENCES interstate.corporate_departments(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES identity.users(id),
   PRIMARY KEY (department_id, user_id)
 );
-CREATE TABLE interstate.transport_requests (
+CREATE TABLE IF NOT EXISTS interstate.transport_requests (
   id TEXT PRIMARY KEY,                              -- req_1
   account_id UUID NOT NULL REFERENCES interstate.corporate_accounts(id),
   department_id UUID NOT NULL REFERENCES interstate.corporate_departments(id),
@@ -209,7 +209,7 @@ CREATE TABLE interstate.transport_requests (
   note TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE TABLE interstate.corporate_invoices (
+CREATE TABLE IF NOT EXISTS interstate.corporate_invoices (
   id TEXT PRIMARY KEY,                              -- inv_corp_x_2026-08
   account_id UUID NOT NULL REFERENCES interstate.corporate_accounts(id),
   period CHAR(7) NOT NULL,                          -- 2026-08
@@ -220,7 +220,7 @@ CREATE TABLE interstate.corporate_invoices (
 );
 
 -- 12) Corridors & FAMS-gated route control (future: cross-border legs)
-CREATE TABLE interstate.corridors (
+CREATE TABLE IF NOT EXISTS interstate.corridors (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   code TEXT UNIQUE NOT NULL,                        -- route.NG-LAG-NG-KAN (FAMS category target)
   origin_state TEXT NOT NULL REFERENCES geo.states(code),

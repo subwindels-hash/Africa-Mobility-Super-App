@@ -86,6 +86,43 @@ CREATE TABLE geo.countries (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE geo.states (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  country_id UUID NOT NULL REFERENCES geo.countries(id),
+  code TEXT UNIQUE NOT NULL,                    -- 'NG-LAG' — FAMS state-level selector
+  name TEXT NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_states_country ON geo.states(country_id);
+
+-- Seed Nigeria + the 36 states & FCT (state codes are the FAMS state selectors)
+INSERT INTO geo.countries (code, name, dial_code, currency, timezone, languages, phase, is_active) VALUES
+  ('NG','Nigeria','+234','NGN','Africa/Lagos','{en,ha,yo,ig,pcm}',1,TRUE),
+  ('GH','Ghana','+233','GHS','Africa/Accra','{en}',2,FALSE),
+  ('KE','Kenya','+254','KES','Africa/Nairobi','{en,sw}',2,FALSE),
+  ('ZA','South Africa','+27','ZAR','Africa/Johannesburg','{en}',2,FALSE),
+  ('AE','United Arab Emirates','+971','AED','Asia/Dubai','{en,ar}',3,FALSE),
+  ('GB','United Kingdom','+44','GBP','Europe/London','{en}',3,FALSE),
+  ('US','United States','+1','USD','America/New_York','{en}',3,FALSE)
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO geo.states (country_id, code, name)
+SELECT c.id, s.code, s.name
+FROM geo.countries c, (VALUES
+  ('NG-AB','Abia'),('NG-AD','Adamawa'),('NG-AK','Akwa Ibom'),('NG-AN','Anambra'),('NG-BA','Bauchi'),
+  ('NG-BY','Bayelsa'),('NG-BE','Benue'),('NG-BOR','Borno'),('NG-CR','Cross River'),('NG-DE','Delta'),
+  ('NG-EB','Ebonyi'),('NG-ED','Edo'),('NG-EK','Ekiti'),('NG-EN','Enugu'),('NG-FCT','Federal Capital Territory'),
+  ('NG-GO','Gombe'),('NG-IM','Imo'),('NG-JI','Jigawa'),('NG-KAD','Kaduna'),('NG-KE','Kebbi'),
+  ('NG-KAN','Kano'),('NG-KAT','Katsina'),('NG-KWA','Kwara'),('NG-LAG','Lagos'),('NG-NAS','Nasarawa'),
+  ('NG-NIG','Niger'),('NG-OG','Ogun'),('NG-OND','Ondo'),('NG-OS','Osun'),('NG-OYO','Oyo'),
+  ('NG-PLA','Plateau'),('NG-RIV','Rivers'),('NG-SOK','Sokoto'),('NG-TAR','Taraba'),('NG-YOB','Yobe'),('NG-ZAM','Zamfara'),
+  ('KE-NAI','Nairobi'),('GH-GA','Greater Accra')
+) AS s(code, name)
+WHERE (c.code = 'NG' AND s.code LIKE 'NG-%') OR (c.code = 'KE' AND s.code = 'KE-NAI') OR (c.code = 'GH' AND s.code = 'GH-GA')
+ON CONFLICT (code) DO NOTHING;
+
+
 CREATE TABLE geo.cities (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   country_id UUID NOT NULL REFERENCES geo.countries(id),
@@ -102,6 +139,24 @@ CREATE TABLE geo.cities (
 );
 CREATE INDEX idx_cities_country ON geo.cities(country_id);
 CREATE INDEX idx_cities_center ON geo.cities USING GIST(center);
+-- Launch cities (phase-1 service cities; WKT points — PostGIS in prod)
+INSERT INTO geo.cities (country_id, code, name, state, center, is_active, launch_date)
+SELECT c.id, v.code, v.name, v.state, v.center, TRUE, DATE '2026-01-01'
+FROM geo.countries c, (VALUES
+  ('NG-LAG','Lagos','Lagos','POINT(3.3792 6.5244)'),
+  ('NG-ABJ','Abuja','Federal Capital Territory','POINT(7.4911 9.0579)'),
+  ('NG-PHC','Port Harcourt','Rivers','POINT(7.0134 4.8156)'),
+  ('NG-BNI','Benin City','Edo','POINT(5.6196 6.3350)'),
+  ('NG-ASB','Asaba','Delta','POINT(6.7425 6.2021)'),
+  ('NG-ENU','Enugu','Enugu','POINT(7.5104 6.4433)'),
+  ('NG-AWK','Awka','Anambra','POINT(7.0733 6.2076)'),
+  ('NG-ONI','Onitsha','Anambra','POINT(6.7865 6.1395)'),
+  ('NG-KAN','Kano','Kano','POINT(8.5219 12.0022)'),
+  ('NG-IBD','Ibadan','Oyo','POINT(3.9057 7.3777)')
+) AS v(code, name, state, center)
+WHERE c.code = 'NG'
+ON CONFLICT (code) DO NOTHING;
+
 
 CREATE TABLE geo.coverage_zones (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -757,6 +812,8 @@ CREATE TABLE money.ledger_accounts (            -- chart of accounts (platform +
   is_active BOOLEAN NOT NULL DEFAULT TRUE
 );
 
+CREATE SEQUENCE IF NOT EXISTS money.journal_seq;
+
 CREATE TABLE money.journal_entries (            -- append-only; reversal = new entry
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   entry_no BIGINT UNIQUE NOT NULL DEFAULT nextval('money.journal_seq'),
@@ -769,7 +826,6 @@ CREATE TABLE money.journal_entries (            -- append-only; reversal = new e
   reversal_of UUID REFERENCES money.journal_entries(id),
   metadata JSONB NOT NULL DEFAULT '{}'
 );
-CREATE SEQUENCE IF NOT EXISTS money.journal_seq;
 
 CREATE TABLE money.journal_lines (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -2451,7 +2507,7 @@ CREATE TABLE interstate.shipments (
   status TEXT NOT NULL DEFAULT 'quote_requested' CHECK (status IN ('quote_requested','quote_accepted','awaiting_pickup','driver_assigned','cargo_loaded','in_transit','checkpoint_update','delivered','completed','cancelled','disputed')),
   quote_minor BIGINT,
   payment_mode TEXT CHECK (payment_mode IN ('instant','escrow','corporate_billing','partial','milestone')),
-  escrow_id UUID REFERENCES wallet.escrow_holds(id),
+  escrow_id UUID REFERENCES money.escrow_holds(id),
   settled_minor BIGINT,
   eta_at TIMESTAMPTZ,
   current_lat DOUBLE PRECISION, current_lng DOUBLE PRECISION,

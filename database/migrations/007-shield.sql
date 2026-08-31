@@ -10,7 +10,7 @@
 CREATE SCHEMA IF NOT EXISTS shield;
 
 -- 1) Agent fleet registry (hundreds → thousands, elastically scaled)
-CREATE TABLE shield.security_agents (
+CREATE TABLE IF NOT EXISTS shield.security_agents (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   agent_key TEXT UNIQUE NOT NULL,               -- agt_n123 (engine handle)
   kind TEXT NOT NULL CHECK (kind IN ('network','application','infrastructure','identity','data','threat_intel','fraud','data_intelligence')),
@@ -23,10 +23,10 @@ CREATE TABLE shield.security_agents (
   findings BIGINT NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','paused','retired'))
 );
-CREATE INDEX idx_shield_agents_kind ON shield.security_agents(kind, status);
+CREATE INDEX IF NOT EXISTS idx_shield_agents_kind ON shield.security_agents(kind, status);
 
 -- 2) Real-time security events (streamed; partitioned by day in production)
-CREATE TABLE shield.security_events (
+CREATE TABLE IF NOT EXISTS shield.security_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   ts TIMESTAMPTZ NOT NULL DEFAULT now(),
   category TEXT NOT NULL CHECK (category IN ('auth','api','wallet','escrow','db','infra','network','vendor','customer','whatsapp','devsecops')),
@@ -40,11 +40,11 @@ CREATE TABLE shield.security_events (
   risk_hints TEXT[] NOT NULL DEFAULT '{}',
   meta JSONB NOT NULL DEFAULT '{}'
 );
-CREATE INDEX idx_shield_events_principal ON shield.security_events(principal, ts DESC);
-CREATE INDEX idx_shield_events_category ON shield.security_events(category, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_shield_events_principal ON shield.security_events(principal, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_shield_events_category ON shield.security_events(category, ts DESC);
 
 -- 3) Detected threats (deduplicated, scored, correlated)
-CREATE TABLE shield.threats (
+CREATE TABLE IF NOT EXISTS shield.threats (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   engine_key TEXT UNIQUE NOT NULL,              -- thr_123 (engine handle)
   ts TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -57,11 +57,11 @@ CREATE TABLE shield.threats (
   campaign_key TEXT,                            -- correlation group
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','containing','contained','resolved','false_positive'))
 );
-CREATE INDEX idx_shield_threats_status ON shield.threats(status, severity DESC);
-CREATE INDEX idx_shield_threats_campaign ON shield.threats(campaign_key);
+CREATE INDEX IF NOT EXISTS idx_shield_threats_status ON shield.threats(status, severity DESC);
+CREATE INDEX IF NOT EXISTS idx_shield_threats_campaign ON shield.threats(campaign_key);
 
 -- 4) Incidents (correlated threat campaigns with timelines)
-CREATE TABLE shield.incidents (
+CREATE TABLE IF NOT EXISTS shield.incidents (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   campaign_key TEXT,
   title TEXT NOT NULL,
@@ -75,7 +75,7 @@ CREATE TABLE shield.incidents (
 );
 
 -- 5) Autonomous response action ledger
-CREATE TABLE shield.response_actions (
+CREATE TABLE IF NOT EXISTS shield.response_actions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   engine_key TEXT UNIQUE NOT NULL,              -- rsp_12
   threat_id UUID REFERENCES shield.threats(id),
@@ -88,10 +88,10 @@ CREATE TABLE shield.response_actions (
   approved_by TEXT,
   ts TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_shield_actions_status ON shield.response_actions(status, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_shield_actions_status ON shield.response_actions(status, ts DESC);
 
 -- 6) Approval workflow queue (high-impact actions need human decision)
-CREATE TABLE shield.action_approvals (
+CREATE TABLE IF NOT EXISTS shield.action_approvals (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   response_action_id UUID NOT NULL REFERENCES shield.response_actions(id),
   action TEXT NOT NULL,
@@ -105,7 +105,7 @@ CREATE TABLE shield.action_approvals (
 );
 
 -- 7) Response policies (configurable thresholds & modes — the guardrails)
-CREATE TABLE shield.response_policies (
+CREATE TABLE IF NOT EXISTS shield.response_policies (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   action TEXT NOT NULL,
   min_severity TEXT NOT NULL CHECK (min_severity IN ('critical','high','medium','low')),
@@ -118,7 +118,7 @@ CREATE TABLE shield.response_policies (
 );
 
 -- 8) Fraud alerts (fraud & trust swarm)
-CREATE TABLE shield.fraud_alerts (
+CREATE TABLE IF NOT EXISTS shield.fraud_alerts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   engine_key TEXT UNIQUE NOT NULL,
   ts TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -130,10 +130,10 @@ CREATE TABLE shield.fraud_alerts (
   recommended_actions TEXT[] NOT NULL DEFAULT '{}',
   trust_score_after INT
 );
-CREATE INDEX idx_shield_fraud_principal ON shield.fraud_alerts(principal, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_shield_fraud_principal ON shield.fraud_alerts(principal, ts DESC);
 
 -- 9) Threat intelligence — attack pattern library (MITRE ATT&CK mapped)
-CREATE TABLE shield.attack_patterns (
+CREATE TABLE IF NOT EXISTS shield.attack_patterns (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   pattern_key TEXT UNIQUE NOT NULL,             -- apt.credential-stuffing
   name TEXT NOT NULL,
@@ -145,7 +145,7 @@ CREATE TABLE shield.attack_patterns (
 );
 
 -- 10) Vulnerability library (dependency/infra/code scanning results)
-CREATE TABLE shield.vulnerabilities (
+CREATE TABLE IF NOT EXISTS shield.vulnerabilities (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   vuln_key TEXT UNIQUE NOT NULL,
   cve TEXT,
@@ -159,10 +159,10 @@ CREATE TABLE shield.vulnerabilities (
   detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   resolved_at TIMESTAMPTZ
 );
-CREATE INDEX idx_shield_vulns_status ON shield.vulnerabilities(status, cvss DESC);
+CREATE INDEX IF NOT EXISTS idx_shield_vulns_status ON shield.vulnerabilities(status, cvss DESC);
 
 -- 11) Security playbooks
-CREATE TABLE shield.playbooks (
+CREATE TABLE IF NOT EXISTS shield.playbooks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   playbook_key TEXT UNIQUE NOT NULL,            -- pb.ato
   name TEXT NOT NULL,
@@ -173,7 +173,7 @@ CREATE TABLE shield.playbooks (
 );
 
 -- 12) Behavioral baselines & models (deviation scoring input)
-CREATE TABLE shield.behavioral_baselines (
+CREATE TABLE IF NOT EXISTS shield.behavioral_baselines (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   principal TEXT UNIQUE NOT NULL,
   active_hours INT[] NOT NULL DEFAULT '{6,23}',
@@ -186,7 +186,7 @@ CREATE TABLE shield.behavioral_baselines (
 );
 
 -- 13) Self-healing recovery runs
-CREATE TABLE shield.recovery_runs (
+CREATE TABLE IF NOT EXISTS shield.recovery_runs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   engine_key TEXT UNIQUE NOT NULL,
   service TEXT NOT NULL,
@@ -201,7 +201,7 @@ CREATE TABLE shield.recovery_runs (
 );
 
 -- 14) Device trust scores (zero-trust device identity)
-CREATE TABLE shield.device_trust (
+CREATE TABLE IF NOT EXISTS shield.device_trust (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   device_id TEXT UNIQUE NOT NULL,
   trust_score INT NOT NULL CHECK (trust_score BETWEEN 0 AND 100),
@@ -213,7 +213,7 @@ CREATE TABLE shield.device_trust (
 );
 
 -- 15) Zero-trust access decisions (continuous verification trail)
-CREATE TABLE shield.access_decisions (
+CREATE TABLE IF NOT EXISTS shield.access_decisions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   ts TIMESTAMPTZ NOT NULL DEFAULT now(),
   principal TEXT NOT NULL,
@@ -224,10 +224,10 @@ CREATE TABLE shield.access_decisions (
   trust_score INT NOT NULL DEFAULT 0,
   ip INET, device_id TEXT
 );
-CREATE INDEX idx_shield_access_principal ON shield.access_decisions(principal, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_shield_access_principal ON shield.access_decisions(principal, ts DESC);
 
 -- 16) Compliance & audit reports (SOC 2 / ISO 27001 / GDPR / NDPR / PCI DSS)
-CREATE TABLE shield.compliance_reports (
+CREATE TABLE IF NOT EXISTS shield.compliance_reports (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   kind TEXT NOT NULL CHECK (kind IN ('security-audit-log','incident-report','compliance-report','forensic-record','access-review','security-assessment')),
   framework TEXT,                               -- SOC2, ISO27001, GDPR, NDPR, PCI_DSS

@@ -10,18 +10,31 @@ ALTER TYPE service_vertical ADD VALUE IF NOT EXISTS 'roadside';
 ALTER TYPE service_vertical ADD VALUE IF NOT EXISTS 'accommodation';
 
 -- 2) WhatsApp enums
-CREATE TYPE wa_direction AS ENUM ('text_in','text_out');  -- placeholder guard for idempotent re-runs is NOT needed; see schema.sql canonical set
-DROP TYPE IF EXISTS wa_direction;
-
 -- (Canonical enum set lives in schema.sql; created here for existing DBs:)
-CREATE TYPE wa_message_type AS ENUM ('text','location','audio','image','document','button','interactive','template','system');
-CREATE TYPE wa_conv_status AS ENUM ('active','awaiting_customer','with_agent','closed','expired');
-CREATE TYPE wa_escalation_reason AS ENUM ('low_confidence','negative_sentiment','explicit_request','refund','safety','fraud');
-CREATE TYPE wa_escalation_status AS ENUM ('pending','with_agent','resolved_ai','resolved_agent','abandoned');
-CREATE TYPE wa_broadcast_status AS ENUM ('draft','pending_approval','scheduled','sending','sent','failed');
-CREATE TYPE wa_template_status AS ENUM ('draft','pending_meta','approved','rejected','paused');
-CREATE TYPE wa_link_status AS ENUM ('created','opened','paid','expired','used_failed');
-CREATE TYPE wa_direction AS ENUM ('inbound','outbound');
+DO $$ BEGIN
+  CREATE TYPE wa_message_type AS ENUM ('text','location','audio','image','document','button','interactive','template','system');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  CREATE TYPE wa_conv_status AS ENUM ('active','awaiting_customer','with_agent','closed','expired');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  CREATE TYPE wa_escalation_reason AS ENUM ('low_confidence','negative_sentiment','explicit_request','refund','safety','fraud');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  CREATE TYPE wa_escalation_status AS ENUM ('pending','with_agent','resolved_ai','resolved_agent','abandoned');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  CREATE TYPE wa_broadcast_status AS ENUM ('draft','pending_approval','scheduled','sending','sent','failed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  CREATE TYPE wa_template_status AS ENUM ('draft','pending_meta','approved','rejected','paused');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  CREATE TYPE wa_link_status AS ENUM ('created','opened','paid','expired','used_failed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  CREATE TYPE wa_direction AS ENUM ('inbound','outbound');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- 3) Schema + tables (full definitions in schema.sql §whatsapp)
 CREATE SCHEMA IF NOT EXISTS whatsapp;
