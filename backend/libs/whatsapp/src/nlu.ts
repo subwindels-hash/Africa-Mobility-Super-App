@@ -18,6 +18,14 @@ export type WaIntent =
   | 'check_availability' | 'manage_services'
   | 'human_agent' | 'unknown';
 
+/** Full intent vocabulary — consumed by the LLM arbitration validator. */
+export const WA_INTENTS: WaIntent[] = [
+  'greeting', 'book_transport', 'book_logistics', 'book_interstate', 'book_travel', 'book_aviation',
+  'book_security', 'book_accommodation', 'roadside_assist', 'track_order', 'track_shipment',
+  'wallet_balance', 'wallet_fund', 'payment', 'modify_booking', 'cancel_booking', 'refund_support',
+  'check_availability', 'manage_services', 'human_agent', 'unknown',
+];
+
 export const INTENT_VERTICAL: Partial<Record<WaIntent, string>> = {
   book_transport: 'transportation', book_logistics: 'logistics', book_interstate: 'logistics', book_travel: 'travel',
   book_aviation: 'aviation', book_security: 'security',

@@ -9,9 +9,10 @@
  * the sandbox, and against the real Cloud API transport.
  */
 import {
-  classify, classifyTranscript, ESCALATION_THRESHOLD, GAZETTEER,
-  matchPlace, type NluResult, type WaLanguage,
+  classify, classifyTranscript, ESCALATION_THRESHOLD, GAZETTEER, INTENT_VERTICAL,
+  matchPlace, type NluResult, type WaIntent, type WaLanguage,
 } from './nlu';
+import { llm, refusalReply } from '../../llm/src/index'; // docs/26 LLM orchestration seam
 import {
   confirmSummary, estimateFor, escalationText, fillSlots, formatNaira, greetingText,
   newSession, nextMissingSlot, quoteFor, receiptText, slotPrompt, startDraft, trackText,
@@ -126,6 +127,42 @@ export const mediaPipeline: MediaPipeline = {
 export function setMediaPipeline(p: MediaPipeline) { Object.assign(mediaPipeline, p); }
 
 /** Entry point — queue consumer calls this for every inbound message. */
+/**
+ * LLM orchestration seam (docs/26): the deterministic core classifies, then
+ * the LLM layer guardrail-checks → redacts → proposes → is validated. A
+ * guardrail refusal never reaches the model — it escalates.
+ */
+async function enhancedNlu(
+  from: string,
+  session: WaSession,
+  core: NluResult,
+  text: string,
+  channel: 'text' | 'voice' | 'image' | 'document',
+): Promise<{ nlu: NluResult } | { refused: OutboundMessage }> {
+  const missing = session.draft
+    ? (Object.keys(session.draft.slots) as Array<keyof typeof session.draft.slots>).filter((k) => !session.draft!.slots[k])
+    : undefined;
+  const enhanced = await llm.enhance(
+    text,
+    { intent: core.intent, confidence: core.confidence, language: core.language, entities: { ...core.entities } as Record<string, unknown> },
+    { channel, missingSlots: missing as string[] | undefined },
+  );
+  if (enhanced.refusal) {
+    const esc = escalate(from, session, { guardrail: enhanced.refusal.kind }, `guardrail:${enhanced.refusal.kind}`);
+    return { refused: { ...esc, text: refusalReply(enhanced.refusal) } }; // guardrail text wins, escalation still happens
+  }
+  const intent = enhanced.intent as WaIntent;
+  return {
+    nlu: {
+      ...core,
+      intent,
+      vertical: INTENT_VERTICAL[intent],
+      confidence: enhanced.confidence,
+      entities: { ...core.entities, ...(enhanced.entities as Partial<typeof core.entities>) },
+    },
+  };
+}
+
 export async function processInbound(msg: InboundMessage): Promise<OutboundMessage> {
   const out = await routeInbound(msg);
   getSession(msg.from).history.push({ role: 'ai', text: out.text, at: new Date().toISOString() });
@@ -165,8 +202,10 @@ async function routeInbound(msg: InboundMessage): Promise<OutboundMessage> {
   if (msg.type === 'audio' && msg.mediaId) {
     const transcript = await mediaPipeline.transcribe(msg.mediaId, session.language);
     session.history.push({ role: 'customer', text: `🎤 "${transcript}"`, at: msg.timestamp });
-    const nlu = classifyTranscript(transcript, 'voice');
-    return route(msg.from, session, nlu, transcript);
+    const core = classifyTranscript(transcript, 'voice');
+    const e = await enhancedNlu(msg.from, session, core, transcript, 'voice');
+    if ('refused' in e) return e.refused;
+    return route(msg.from, session, e.nlu, transcript);
   }
 
   if (msg.type === 'image' && msg.mediaId) {
@@ -174,8 +213,10 @@ async function routeInbound(msg: InboundMessage): Promise<OutboundMessage> {
     if (!ocrText && locations.length === 0) {
       return { to: msg.from, text: '🖼 I received the image but couldn\'t read it clearly. Could you type the address or send a location pin?', meta: { node: session.node } };
     }
-    const nlu = classifyTranscript(ocrText || 'address', 'image', { locations });
-    return route(msg.from, session, nlu, ocrText || locations.map((l) => l.raw).join(' to '));
+    const core = classifyTranscript(ocrText || 'address', 'image', { locations });
+    const e = await enhancedNlu(msg.from, session, core, ocrText || locations.map((l) => l.raw).join(' to '), 'image');
+    if ('refused' in e) return e.refused;
+    return route(msg.from, session, e.nlu, ocrText || locations.map((l) => l.raw).join(' to '));
   }
 
   // documents (PDF booking refs, invoices, visa papers) → OCR → intent
@@ -185,8 +226,10 @@ async function routeInbound(msg: InboundMessage): Promise<OutboundMessage> {
     if (!ocrText.trim()) {
       return { to: msg.from, text: '📄 I got your document. Tell me briefly what you need — e.g. *"book a tour package"*, *"check my booking BKG-12345"* or *"process this visa letter"* — and I\'ll take it from there.', meta: { node: session.node } };
     }
-    const nlu = classifyTranscript(ocrText, 'document');
-    return route(msg.from, session, nlu, ocrText);
+    const core = classifyTranscript(ocrText, 'document');
+    const e = await enhancedNlu(msg.from, session, core, ocrText, 'document');
+    if ('refused' in e) return e.refused;
+    return route(msg.from, session, e.nlu, ocrText);
   }
 
   const text = msg.text ?? msg.button ?? '';
@@ -196,9 +239,11 @@ async function routeInbound(msg: InboundMessage): Promise<OutboundMessage> {
   const confirmed = handleConfirmation(msg.from, session, text);
   if (confirmed) return confirmed;
 
-  const nlu = classify(text);
-  session.language = nlu.language; // adapt to customer's language
-  return route(msg.from, session, nlu, text);
+  const core = classify(text);
+  session.language = core.language; // adapt to customer's language
+  const e = await enhancedNlu(msg.from, session, core, text, 'text');
+  if ('refused' in e) return e.refused;
+  return route(msg.from, session, e.nlu, text);
 }
 
 // ── Interstate logistics bridge (docs/32 §whatsapp) ────────────────────────

@@ -42,6 +42,8 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
 import * as core from '../../libs/core/src/index';
 import * as wa from '../../libs/whatsapp/src/index';
+import { llm } from '../../libs/llm/src/index';
+import { WA_INTENTS } from '../../libs/whatsapp/src/nlu';
 import { shield } from '../../libs/shield/src/index';
 import { organism, TOTAL_AGENTS, LAYERS, fleetSummary, EXECUTIVE_CLUSTERS } from '../../libs/organism/src/index';
 import { MobilitySystem, COMMAND_AUTH_MODEL } from '../../libs/mobility/src/index';
@@ -1217,6 +1219,13 @@ app.get('/v1/whatsapp/sessions/:phone', (req, res) => {
 });
 
 app.get('/v1/whatsapp/stats', (_req, res) => res.json(wa.stats));
+// LLM orchestration observability (docs/26): guardrails + arbitration audit trail
+llm.setIntents(WA_INTENTS); // engine vocabulary gates every proposal
+app.get('/v1/whatsapp/llm', (_req, res) => res.json({
+  mode: process.env.LLM_MODE ?? 'assist',
+  stats: llm.stats,
+  audit: llm.audit.slice(-25).reverse(),
+}));
 
 const PORT = Number(process.env.PORT ?? 4000);
 if (process.env.RUN_SERVER === '1') {

@@ -41,6 +41,15 @@ const TRAINING = [
   ['book_logistics', 'voice: "I wan send cake go Surulere"', <Badge key="3" tone="brand">intent ✓</Badge>],
 ];
 
+const LLM_AUDIT = [
+  ['10:42:18', 'text', 'unknown (0.18)', 'book_interstate (0.82)', <Badge key="1" tone="brand">llm adopted</Badge>, 'core weak — valid proposal in vocabulary'],
+  ['10:41:57', 'text', 'book_transport (0.91)', 'book_transport (0.78)', <Badge key="2" tone="slate">core</Badge>, 'core strong — LLM entities merged'],
+  ['10:41:12', 'voice', 'book_travel (0.92)', '— not consulted —', <Badge key="3" tone="slate">skipped</Badge>, 'core confident (0.92)'],
+  ['10:40:44', 'text', 'refund_support (0.44)', '— never sent —', <Badge key="4" tone="danger">refused</Badge>, 'guardrail: refund_promise → escalated'],
+  ['10:39:59', 'text', 'book_security (0.88)', 'book_aviation (0.71)', <Badge key="5" tone="slate">core</Badge>, 'core strong keeps intent; entity bankPin rejected (schema-closed)'],
+  ['10:39:21', 'image', 'book_logistics (0.19)', 'book_logistics (0.74)', <Badge key="6" tone="brand">llm adopted</Badge>, 'OCR text low-confidence — proposal validated'],
+];
+
 export default function WhatsAppAdminPage() {
   return (
     <PortalShell
@@ -88,6 +97,34 @@ export default function WhatsAppAdminPage() {
           <p className="mt-3 text-xs text-slate-500">
             Escalated transcripts flow here for labeling → weekly model retrain (champion/challenger, docs/19).
           </p>
+        </div>
+      </div>
+
+      <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-base font-bold text-slate-900">LLM orchestration — LLM proposes, engines validate</h2>
+            <p className="text-xs text-slate-500">docs/26 seam: deterministic NLU core classifies → guardrails (refusal, PII redaction) → provider proposal → arbitration against the engine vocabulary · live feed at <code className="rounded bg-slate-100 px-1">GET /v1/whatsapp/llm</code></p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge tone="brand">mode: assist</Badge>
+            <Badge tone="slate">provider: heuristic-v1 (offline)</Badge>
+            <Badge tone="brand">vocab: 21 intents</Badge>
+          </div>
+        </div>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-6">
+          <StatCard label="Consultations" value="1,284" sub="core &lt; 0.55 confidence" />
+          <StatCard label="Proposals accepted" value="57%" sub="llm + merged" />
+          <StatCard label="Rejected by engine" value="43%" sub="schema / vocabulary" />
+          <StatCard label="Guardrail refusals" value="37" sub="refund promises etc." />
+          <StatCard label="PII redactions" value="214" sub="phone · email · PAN · BVN" />
+          <StatCard label="Provider errors" value="0.4%" sub="fallback → core" />
+        </div>
+        <div className="mt-4">
+          <DataTable
+            headers={['Time', 'Channel', 'Core intent (conf)', 'LLM proposal', 'Decision', 'Reason']}
+            rows={LLM_AUDIT}
+          />
         </div>
       </div>
 
