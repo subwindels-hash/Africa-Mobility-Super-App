@@ -16,7 +16,7 @@ A **technology marketplace** — AMSA owns no cars, bikes, aircraft, boats, or s
 |---|---|
 | **`docs/`** | Complete enterprise documentation library — **all 60+ deliverables** (exec summary → GTM → WhatsApp AI platform). Start at [`docs/00-INDEX.md`](docs/00-INDEX.md) |
 | **`database/`** | Complete PostgreSQL schema (86+ tables, 50+ enums, triggers, views, seed data) + ER diagrams + migrations |
-| **`backend/`** | NestJS/Node backend monorepo with **working domain core**: booking state machine, fare engine with surge guardrails, double-entry ledger, escrow lifecycle, matching engine — **and the WhatsApp Smart AI platform (Ada: NLU in 5 languages, slot-filling dialog, payment links, human escalation)** — 53 passing tests + runnable API |
+| **`backend/`** | NestJS/Node backend monorepo with **working domain core**: booking state machine, fare engine with surge guardrails, double-entry ledger, escrow lifecycle, matching engine, **communication fallback (auto GSM switch)** — **and the WhatsApp Smart AI platform (Ada: NLU in 5 languages, slot-filling dialog, AI quotation engine, payment links, availability & service management, human escalation)** — 68 passing tests + runnable API |
 | **`web/`** | Next.js 15 + TypeScript + Tailwind web platform: marketing site, Vendor Console, Corporate Portal, Admin Control Center **+ WhatsApp AI Control Center** |
 | **`mobile/`** | Flutter apps (customer / driver / rider flavors) — feature-first clean architecture scaffold |
 | **`infra/`** | docker-compose local stack, Kubernetes (EKS) manifests, Terraform AWS baseline, CI/CD pipeline with security gates |

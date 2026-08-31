@@ -27,6 +27,8 @@ class HomeShell extends StatelessWidget {
     ('Fly', '✈️', Color(0xFF0E67A6)),
     ('Protect', '🛡', Color(0xFF101828)),
     ('Charter', '🚁', Color(0xFFC2932A)),
+    ('Stay', '🏨', Color(0xFF0E67A6)),
+    ('Rescue', '🛠', Color(0xFFDC6803)),
     ('Intercity', '🚐', Color(0xFF17A558)),
   ];
 

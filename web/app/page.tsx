@@ -116,7 +116,7 @@ export default function LandingPage() {
         <Container>
           <SectionTitle
             center
-            eyebrow="One app · Ten verticals"
+            eyebrow="One app · Twelve verticals"
             title="Every service that moves you, your goods and your people"
             sub="A technology marketplace: AMSA owns no vehicles, aircraft or security firms — we verify the providers, protect the payments and guarantee the quality."
           />

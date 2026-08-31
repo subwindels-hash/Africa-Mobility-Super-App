@@ -82,6 +82,7 @@ AMSA is a multi-vertical technology marketplace combining Transportation, Logist
 | 59 | Vendor Acquisition Strategy | `25-gtm-strategy.md` |
 | 60 | Corporate Sales Strategy | `25-gtm-strategy.md` |
 | 61 | WhatsApp Smart AI Customer Service Platform | `26-whatsapp-ai-platform.md` |
+| 62 | Deliverables Traceability Map (consolidated spec audit) | `27-deliverables-traceability.md` |
 
 ## Platform Apps & Brands
 

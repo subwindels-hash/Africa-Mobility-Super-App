@@ -14,7 +14,7 @@ import {
 } from './nlu';
 import {
   confirmSummary, estimateFor, escalationText, fillSlots, formatNaira, greetingText,
-  newSession, nextMissingSlot, receiptText, slotPrompt, startDraft, trackText,
+  newSession, nextMissingSlot, quoteFor, receiptText, slotPrompt, startDraft, trackText,
   type BookingDraft, type WaSession,
 } from './dialog';
 import { createPaymentLink, paymentLinkText } from './payments';
@@ -197,6 +197,37 @@ async function route(phone: string, session: WaSession, nlu: NluResult, rawText:
     case 'refund_support':
       return escalate(phone, session, meta, 'refund');
 
+    case 'check_availability': {
+      stats.aiResolved++;
+      const city = matchPlace(rawText)?.name ?? 'your city';
+      const text = [
+        '🗺 *Where AMSA is available*',
+        '',
+        '*Live now (10 cities):* Lagos · Abuja · Port Harcourt · Benin City · Asaba · Enugu · Awka · Onitsha · Kano · Ibadan',
+        '',
+        `*Services in ${city}:* 🚗 rides · 📦 dispatch & delivery · ✈️ flights · 🏨 hotels & short-lets · 🛡 verified security · 🛠 roadside assistance`,
+        '🚁 private charters & ⚓ marine operate nationwide from Lagos / Abuja / Port Harcourt.',
+        '',
+        'Coming next: Accra 🇬🇭 · Nairobi 🇰🇪 · Johannesburg 🇿🇦.',
+        `Want me to book something in *${city}* right now?`,
+      ].join('\n');
+      return { to: phone, text, meta: { ...meta, node: 'greeting' } };
+    }
+
+    case 'manage_services': {
+      stats.aiResolved++;
+      const mine = [...bookings.values()].filter((b) => b.phone === phone);
+      if (mine.length === 0) {
+        return { to: phone, text: '📋 You have no bookings on this number yet. Tell me what you need — e.g. *"taxi from Lekki to Ikeja"* — and I\'ll set it up.', meta: { ...meta, node: 'greeting' } };
+      }
+      const lines = mine.slice(-5).map((b) => `• *${b.id}* — ${b.draft.vertical} · ${b.status} · ${formatNaira(b.totalMinor)}`);
+      return {
+        to: phone,
+        text: ['📋 *Your bookings:*', '', ...lines, '', 'Reply *track* (live location), *cancel*, *reschedule* or *pay* — or send a booking ID.'].join('\n'),
+        meta: { ...meta, node: 'tracking', bookingId: mine[mine.length - 1].id },
+      };
+    }
+
     case 'cancel_booking': {
       const b = session.lastBookingId ? bookings.get(session.lastBookingId) : undefined;
       if (!b) return { to: phone, text: 'No recent booking on this number to cancel. Send the booking ID if you have one.', meta };
@@ -233,6 +264,7 @@ function nextStep(phone: string, session: WaSession, meta: any = {}): OutboundMe
   }
   const estimate = estimateFor(draft);
   draft.estimate = estimate;
+  if (!estimate) draft.quote = quoteFor(draft);
   draft.quoteRef = `RFQ-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
   session.node = 'confirm';
   return { to: phone, text: confirmSummary(draft, estimate, draft.quoteRef), meta: { ...meta, node: 'confirm', intent: draft.intent } };
@@ -244,7 +276,7 @@ export function handleConfirmation(phone: string, session: WaSession, raw: strin
   const draft = session.draft!;
   if (/^(1|yes|y|confirm|ok|okay|book|yes abeg|i confirm)/i.test(raw.trim())) {
     const id = `BKG-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-    const totalMinor = draft.estimate?.range.min ?? 3_500_000;
+    const totalMinor = draft.estimate?.range.min ?? draft.quote?.minMinor ?? 3_500_000;
     const vendor = pickVendorFor(draft);
     bookings.set(id, { id, phone, draft, totalMinor, vendor, status: 'matched' });
     session.lastBookingId = id;

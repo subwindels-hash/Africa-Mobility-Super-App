@@ -15,6 +15,7 @@ export type WaIntent =
   | 'book_security' | 'book_accommodation' | 'roadside_assist'
   | 'track_order' | 'wallet_balance' | 'wallet_fund' | 'payment'
   | 'modify_booking' | 'cancel_booking' | 'refund_support'
+  | 'check_availability' | 'manage_services'
   | 'human_agent' | 'unknown';
 
 export const INTENT_VERTICAL: Partial<Record<WaIntent, string>> = {
@@ -63,6 +64,8 @@ const RULES: IntentRule[] = [
   { intent: 'refund_support', patterns: [/refund|my money back|complain|issue|problem|not happy|scam|wrong (charge|fare)|report/i], weight: 2 },
   { intent: 'cancel_booking', patterns: [/cancel/i], weight: 2 },
   { intent: 'modify_booking', patterns: [/(re)?schedule|change.*(time|booking|destination|address)|reschedule|move my (booking|ride)/i], weight: 2 },
+  { intent: 'check_availability', patterns: [/(is|are) .*(available|operational|running)|availability|do you (offer|have|provide|do|cover)|what services|which cities|areas? (do|you) cover/i], weight: 3 },
+  { intent: 'manage_services', patterns: [/manage my|my (bookings|services|orders|account|subscriptions?)|view my (bookings|orders)|booking history|my trips/i], weight: 3 },
   { intent: 'human_agent', patterns: [/agent|human|real person|customer care|talk to.*(person|someone|human)|operator|live person/i], weight: 3 },
 ];
 
@@ -222,8 +225,8 @@ export function extractEntities(text: string): NluEntities {
     if (new RegExp(`\\b${kw}\\b`, 'i').test(t)) { entities.serviceClass = code; break; }
   }
 
-  const pax = t.match(/\b(\d)\s*(passenger|pax|people|person|rider)?\b/);
-  if (pax && parseInt(pax[1], 10) > 0 && parseInt(pax[1], 10) <= 9) entities.passengers = parseInt(pax[1], 10);
+  const pax = t.match(/\b(\d)\s*(passengers?|pax|people|persons?|riders?)\b/);
+  if (pax) entities.passengers = parseInt(pax[1], 10);
 
   const nights = t.match(/\b(\d)\s*(night|nights)\b/);
   if (nights) entities.nights = parseInt(nights[1], 10);

@@ -4,6 +4,7 @@
  */
 import type { NluEntities, NluResult, WaLanguage } from './nlu';
 import { computeFare, type FareBreakdown } from '../../core/src/domain/fare-engine';
+import { generateQuote, type AiQuote } from './quotes';
 import type { Money } from '../../core/src/domain/types';
 
 export type DialogNode =
@@ -16,6 +17,7 @@ export interface BookingDraft {
   slots: Partial<Record<SlotKey, string | number | undefined>>;
   required: SlotKey[];
   estimate?: FareBreakdown;
+  quote?: AiQuote;
   quoteRef?: string;
 }
 
@@ -118,6 +120,20 @@ export function estimateFor(draft: BookingDraft): FareBreakdown | undefined {
   return undefined;
 }
 
+/** AI quotation for non-fare verticals (security/aviation/roadside/accommodation). */
+export function quoteFor(draft: BookingDraft): AiQuote | undefined {
+  const s = draft.slots;
+  return generateQuote(draft.vertical, {
+    days: typeof s.nights === 'number' ? s.nights : 1,
+    nights: typeof s.nights === 'number' ? s.nights : 1,
+    agents: 2,
+    pax: typeof s.passengers === 'number' ? s.passengers : undefined,
+    hours: 1,
+    serviceType: String(s.serviceType ?? ''),
+    assistType: String(s.assistType ?? ''),
+  });
+}
+
 export function formatNaira(minor: number): string {
   return `₦${(minor / 100).toLocaleString('en-NG', { maximumFractionDigits: 0 })}`;
 }
@@ -134,9 +150,14 @@ export function confirmSummary(draft: BookingDraft, estimate: FareBreakdown | un
   if (estimate) {
     lines.push('', `💰 Estimated fare: *${formatNaira(estimate.range.min)} – ${formatNaira(estimate.range.max)}*`);
     if (estimate.surge > 1) lines.push(`⚡ Demand is high (${estimate.surge}×, capped at 2.0×)`);
+  } else if (draft.quote) {
+    const q = draft.quote;
+    lines.push('', `💰 Quotation: *${formatNaira(q.minMinor)} – ${formatNaira(q.maxMinor)}*`, `_${q.basis}_`);
+    if (q.milestones) lines.push(`🔐 Milestone escrow: ${q.milestones.map((m) => `${m.label} ${m.pct}%`).join(' · ')}`);
+    lines.push(`⏳ Quote valid ${q.validityHours}h — reference ${quoteRef}`);
   }
-  if (draft.vertical === 'security' || draft.vertical === 'aviation' || draft.vertical === 'accommodation' || draft.vertical === 'travel') {
-    lines.push('', '🧾 Quote reference: ' + quoteRef + ' — verified vendors will confirm price shortly.');
+  if (!estimate && !draft.quote && draft.vertical === 'travel') {
+    lines.push('', '🧾 Quote reference: ' + quoteRef + ' — I\'ll search live flights (Amadeus/Sabre) and send priced options shortly.');
   }
   lines.push('', 'Reply *1* to confirm and pay 🔒 (escrow-protected) or *2* to change something.');
   return lines.join('\n');

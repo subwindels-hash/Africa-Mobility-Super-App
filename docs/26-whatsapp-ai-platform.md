@@ -123,9 +123,12 @@ On escalation: full transcript + context handed to the agent console (`/admin/wh
 
 | Capability | Implementation |
 |---|---|
-| NLP / intent detection | 17 intents across 8 service families + support intents; rule+gazetteer core with LLM fallback |
+| NLP / intent detection | 19 intents across 8 service families + support intents; rule+gazetteer core with LLM fallback |
 | Entity extraction | locations (gazetteer + labeled OCR), datetime (incl. "tomorrow 4pm", "sharp sharp"), class, passengers, item, nights, assist type |
 | Conversational AI + context memory | per-phone session: node, draft slots, last booking, language, rolling history |
+| **AI quotation generation** | `quotes.ts` rate-card engine — security (agent-days, milestone escrow 50/30/20), aviation (block hours by aircraft class), roadside (call-out rates), accommodation (nightly × stay type); validated bands + validity windows |
+| **Service discovery + availability** | `check_availability` intent → live-city + per-city service view |
+| **Booking management** | `manage_services` intent → booking list with track/cancel/reschedule/pay actions |
 | Recommendation engine | next-best-service suggestions from history (ride → airport transfer attach) |
 | Dynamic service matching | vendor pick reuses the platform matching score (proximity·scorecard·tier·health) |
 | Smart routing | skill/language-based agent queues |
@@ -157,9 +160,9 @@ Total & active conversations · completed bookings · conversion rate · CSAT ·
 | POST | `/v1/whatsapp/broadcasts` | Campaign create (admin, approved templates only) |
 | GET | `/v1/whatsapp/analytics?from=&to=` | Dashboard metrics |
 
-## 15. Test Coverage (30 tests, all green)
+## 15. Test Coverage (44 WhatsApp tests, all green — 68 total suite)
 
-Intent classification across all 8 families · language detection (5 languages) · location extraction (typed/pidgin/OCR-labeled/pin) · datetime parsing · full booking conversations (taxi & delivery, slot-filling, confirm/change/cancel) · wallet & signed payment links (tamper + single-use rejection) · voice & image adapters · Pidgin receipts · escalation (confidence/explicit/negative-sentiment) · stats accounting.
+Intent classification across all 8 families · language detection (5 languages) · location extraction (typed/pidgin/OCR-labeled/pin) · datetime parsing · full booking conversations (taxi & delivery, slot-filling, confirm/change/cancel) · wallet & signed payment links (tamper + single-use rejection) · voice & image adapters · Pidgin receipts · escalation (confidence/explicit/negative-sentiment) · stats accounting · **quotation engine (security/aviation/roadside/accommodation bands & milestones)** · **availability & service-management intents** · **communication fallback ladder (WebRTC → GSM → SMS with hysteresis)**.
 
 ## 16. Rollout Plan
 

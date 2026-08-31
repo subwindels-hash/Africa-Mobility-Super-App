@@ -92,7 +92,9 @@ INSERT INTO platform.service_categories (vertical,code,name,booking_mode,base_fa
  ('accommodation','hotel.search','Hotel Search','search',0,'{"provider":"marketplace"}',NULL,10),
  ('accommodation','hotel.booking','Hotel Booking','instant',0,'{"nightly":true}',NULL,20),
  ('accommodation','apartment.booking','Apartment Booking','instant',0,'{"nightly":true}',NULL,30),
- ('accommodation','shortlet.reservation','Short-Let Reservations','instant',0,'{"nightly":true}',NULL,40);
+ ('accommodation','shortlet.reservation','Short-Let Reservations','instant',0,'{"nightly":true}',NULL,40),
+ ('accommodation','vacation.rental','Vacation Rentals','instant',0,'{"nightly":true}',NULL,50),
+ ('accommodation','corporate.accommodation','Corporate Accommodation','scheduled',0,'{"nightly":true,"corporate":true}',NULL,60);
 
 -- Subscription plans ---------------------------------------------------------
 INSERT INTO platform.subscription_plans (tier,name,monthly_price,currency,max_listings,monthly_booking_cap,commission_discount_pts,payout_sla,features) VALUES
