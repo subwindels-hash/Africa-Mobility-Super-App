@@ -84,6 +84,7 @@ AMSA is a multi-vertical technology marketplace combining Transportation, Logist
 | 61 | WhatsApp Smart AI Customer Service Platform | `26-whatsapp-ai-platform.md` |
 | 62 | Deliverables Traceability Map (consolidated spec audit) | `27-deliverables-traceability.md` |
 | 63 | FAMS — Feature Activation Management System (activation control plane, spec v2) | `28-fams.md` |
+| 64 | SHIELD — Autonomous Cybersecurity, Threat Intelligence & Platform Defense Swarm | `29-shield.md` |
 
 ## Platform Apps & Brands
 

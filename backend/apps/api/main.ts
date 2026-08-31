@@ -25,10 +25,20 @@
  *   GET  /v1/fams/rules · /v1/fams/locations · /v1/fams/analytics · /v1/fams/health
  *   → Feature Activation Middleware guards /v1/bookings* (403 + canonical message,
  *     full pipeline trace: location→country→state→city→flag→vendor→booking)
+ *
+ * SHIELD — Autonomous Cybersecurity & Threat Intelligence Swarm (docs/29):
+ *   GET/POST /v1/shield/soc · /v1/shield/events · /v1/shield/threats
+ *   POST /v1/shield/threats/:id/status · /v1/shield/correlate
+ *   GET /v1/shield/agents · POST /v1/shield/agents/scale (hundreds→thousands)
+ *   POST /v1/shield/fraud · GET /v1/shield/approvals · POST :id/decide
+ *   GET /v1/shield/response · PUT /v1/shield/response/armed (kill-safe)
+ *   GET /v1/shield/intel · POST /v1/shield/heal · POST /v1/shield/verify
+ *   GET /v1/shield/compliance (SOC2·ISO27001·GDPR·NDPR·PCI DSS)
  */
 import express, { type Request, type Response, type NextFunction } from 'express';
 import * as core from '../../libs/core/src/index';
 import * as wa from '../../libs/whatsapp/src/index';
+import { shield } from '../../libs/shield/src/index';
 import {
   FamsEngine, type FamsRule, type FamsValue, type FamsLevel, type FamsContext, type FamsTargetKind,
   PLATFORM_MODULES, VERTICAL_MODULE, CATEGORY_VERTICAL, PHASES, ASSET_TYPES, VENDOR_STATE_VALUE,
@@ -139,6 +149,10 @@ app.post('/v1/bookings/estimate', (req, res) => {
 app.post('/v1/bookings', auth, (req: any, res) => {
   const { pickup, dropoff, stops, scheduledAt } = req.body ?? {};
   if (!pickup?.lat || !dropoff?.lat) return problem(res, 422, 'VALIDATION_FAILED', 'pickup and dropoff required');
+  // SHIELD passive telemetry — the fraud swarm observes every booking
+  // (observe-only here; autonomous actions flow through response policies)
+  shield.ingestEvent({ category: 'api', source: 'mobile-app', principal: req.userId, action: 'booking.create', outcome: 'success', meta: { scheduled: Boolean(scheduledAt) } });
+  shield.assessFraud({ kind: 'booking', principal: req.userId, amountMinor: undefined, meta: {} });
   const id = `bkg_${Math.random().toString(36).slice(2, 10)}`;
   const breakdown = core.computeFare({ pickup, dropoff, stops });
   const shortlist = core.rankCandidates(DRIVERS, { pickup, top: 5 });
@@ -440,6 +454,95 @@ app.get('/v1/fams/analytics', (_req, res) => {
 });
 
 app.get('/v1/fams/health', (_req, res) => res.json({ ok: true, rules: fams.listRules().length, emergencies: fams.listEmergencies().length, schedules: fams.listSchedules().length }));
+
+// ─── SHIELD — Autonomous Cybersecurity & Threat Intelligence Swarm (docs/29) ─
+// SOC snapshot, event ingestion, fraud assessment, response approvals, intel,
+// self-healing, zero-trust verification and compliance posture.
+const shieldBaseline = shield.scale({ demandIndex: 1, infrastructureSize: 14, transactionsPerMin: 1200, threatLevel: 'low', countries: 1, vendors: 500, activeCustomers: 60_000 }); // baseline fleet; /v1/shield/agents/scale re-plans live
+app.get('/v1/shield/soc', (_req, res) => res.json(shield.soc()));
+
+app.post('/v1/shield/events', (req, res) => {
+  const b = req.body ?? {};
+  if (!b.action || !b.category) return problem(res, 422, 'VALIDATION_FAILED', 'category and action required');
+  const { threats, actions } = shield.ingestEvent({
+    category: b.category, source: b.source ?? 'api', principal: b.principal, ip: b.ip,
+    deviceId: b.deviceId, action: b.action, outcome: b.outcome, bytesOut: b.bytesOut,
+    riskHints: b.riskHints, meta: b.meta, ts: b.ts ? new Date(b.ts) : undefined,
+  });
+  res.status(201).json({ threats, actions, securityScore: shield.securityScore() });
+});
+
+app.get('/v1/shield/threats', (req, res) => {
+  res.json({ threats: shield.detection.list({ status: req.query.status as any, type: req.query.type as any }) });
+});
+
+app.post('/v1/shield/threats/:id/status', (req, res) => {
+  const { status } = req.body ?? {};
+  if (!['open', 'containing', 'contained', 'resolved', 'false_positive'].includes(status)) {
+    return problem(res, 422, 'VALIDATION_FAILED', 'status must be open|containing|contained|resolved|false_positive');
+  }
+  const t = shield.detection.setStatus(req.params.id, status);
+  if (!t) return problem(res, 404, 'NOT_FOUND', 'Threat not found');
+  if (status === 'resolved' || status === 'false_positive') shield.intel.archiveIncident(t);
+  res.json({ threat: t });
+});
+
+app.post('/v1/shield/correlate', (_req, res) => res.json(shield.correlate()));
+
+app.get('/v1/shield/agents', (_req, res) => res.json(shield.agents.status()));
+
+app.post('/v1/shield/agents/scale', (req, res) => {
+  const b = req.body ?? {};
+  const { planned, total } = shield.scale({
+    demandIndex: b.demandIndex, infrastructureSize: b.infrastructureSize,
+    transactionsPerMin: b.transactionsPerMin, threatLevel: b.threatLevel,
+    countries: b.countries, vendors: b.vendors, activeCustomers: b.activeCustomers,
+  });
+  res.json({ planned, totalAgents: total });
+});
+
+app.post('/v1/shield/fraud', (req, res) => {
+  const b = req.body ?? {};
+  if (!b.kind || !b.principal) return problem(res, 422, 'VALIDATION_FAILED', 'kind and principal required');
+  const out = shield.assessFraud({ kind: b.kind, principal: b.principal, amountMinor: b.amountMinor, city: b.city, deviceId: b.deviceId, meta: b.meta });
+  res.status(out.alert ? 201 : 200).json({ ...out, trustScore: shield.fraud.trustScore(b.principal) });
+});
+
+app.get('/v1/shield/approvals', (_req, res) => res.json({ pending: shield.response.pendingApprovals() }));
+
+app.post('/v1/shield/approvals/:id/decide', (req, res) => {
+  const { decision, admin } = req.body ?? {};
+  if (!['approved', 'rejected'].includes(decision)) return problem(res, 422, 'VALIDATION_FAILED', 'decision must be approved|rejected');
+  const rec = shield.response.decide(req.params.id, decision, admin ?? 'admin_api');
+  if (!rec) return problem(res, 404, 'NOT_FOUND', 'Approval not found or already decided');
+  res.json({ record: rec });
+});
+
+app.get('/v1/shield/response', (_req, res) => res.json({ policies: shield.response.listPolicies(), ledger: shield.response.listRecords().slice(-50) }));
+
+app.put('/v1/shield/response/armed', (req, res) => {
+  const { armed } = req.body ?? {};
+  if (typeof armed !== 'boolean') return problem(res, 422, 'VALIDATION_FAILED', 'armed (boolean) required');
+  shield.response.armed = armed;
+  res.json({ armed: shield.response.armed, note: armed ? 'autonomous response ARMED — policies execute per mode' : 'DISARMED — observe & alert only' });
+});
+
+app.get('/v1/shield/intel', (_req, res) => res.json({ ...shield.intel.export(), prioritized: shield.intel.prioritize(), prediction: shield.intel.predict() }));
+
+app.post('/v1/shield/heal', (req, res) => {
+  const services = req.body?.services;
+  if (!Array.isArray(services) || services.length === 0) return problem(res, 422, 'VALIDATION_FAILED', 'services[] required ({service, status, latencyMs?, errorRate?})');
+  const out = shield.heal(services);
+  res.json({ ...out, runs: shield.healing.list().slice(-10) });
+});
+
+app.post('/v1/shield/verify', (req, res) => {
+  const b = req.body ?? {};
+  if (!b.capability || !b.role) return problem(res, 422, 'VALIDATION_FAILED', 'role and capability required');
+  res.json(shield.verify({ principal: b.principal ?? 'anon', role: b.role, capability: b.capability, deviceId: b.deviceId, deviceTrust: b.deviceTrust, ip: b.ip, sessionAgeMin: b.sessionAgeMin, mfaDone: b.mfaDone, riskScore: b.riskScore }));
+});
+
+app.get('/v1/shield/compliance', (_req, res) => res.json(shield.compliance()));
 
 // ─── WhatsApp Smart AI Customer Service Platform (docs/26) ──────────────────
 app.get('/webhooks/whatsapp', wa.verifyWebhook);

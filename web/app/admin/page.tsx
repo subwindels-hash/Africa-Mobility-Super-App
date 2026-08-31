@@ -5,6 +5,7 @@ export const metadata = { title: 'AMSA Admin Control Center' };
 const NAV = [
   { label: 'Overview', icon: '▤', active: true },
   { label: 'FAMS', icon: '🧩' },
+  { label: 'SHIELD SOC', icon: '🛡' },
   { label: 'WhatsApp AI', icon: '💬' },
   { label: 'KYC queue', icon: '🕵' },
   { label: 'Vendor review', icon: '🏢' },
