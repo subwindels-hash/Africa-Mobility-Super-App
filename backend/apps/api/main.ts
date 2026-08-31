@@ -46,6 +46,22 @@ import { shield } from '../../libs/shield/src/index';
 import { organism, TOTAL_AGENTS, LAYERS, fleetSummary, EXECUTIVE_CLUSTERS } from '../../libs/organism/src/index';
 import { MobilitySystem, COMMAND_AUTH_MODEL } from '../../libs/mobility/src/index';
 import { InterstateSystem, InterstateWhatsAppBridge, haversineKm } from '../../libs/interstate/src/index';
+import { SessionStore, RefreshManager, AuditLog, generateTotpSecret, verifyTotp } from '../../libs/auth/src/index';
+import { WalletService } from '../../libs/wallet/src/index';
+import { PaymentService } from '../../libs/payments/src/index';
+import { TravelService } from '../../libs/travel/src/index';
+import { VendorService } from '../../libs/vendors/src/index';
+import { LoyaltyService } from '../../libs/loyalty/src/index';
+import { DisputeService } from '../../libs/disputes/src/index';
+import { KycService, PrivacyService, PciTracker, screen } from '../../libs/compliance/src/index';
+import { NotificationService } from '../../libs/notifications/src/index';
+import { MediaService } from '../../libs/media/src/index';
+import { GeoService } from '../../libs/geo/src/index';
+import { SignalingServer, MessageStore, SmsGateway } from '../../libs/chat/src/index';
+import {
+  VerticalEngine, AIRCRAFT_TYPES, ROOM_TYPES, EXPERIENCES, SECURITY_SERVICES,
+  ROADSIDE_RATES, INTERCITY_ROUTES, MARINE_VESSELS, CORPORATE_SERVICES,
+} from '../../libs/verticals/src/index';
 import {
   FamsEngine, type FamsRule, type FamsValue, type FamsLevel, type FamsContext, type FamsTargetKind,
   PLATFORM_MODULES, VERTICAL_MODULE, CATEGORY_VERTICAL, PHASES, ASSET_TYPES, VENDOR_STATE_VALUE,
@@ -908,7 +924,267 @@ app.get('/v1/interstate/analytics', (_req, res) => res.json(interstate.analytics
   { avgHealthPct: 88, maintenanceDue: 3 },
 )));
 
+// ─── PLATFORM SERVICES (auth · wallet · payments · travel · vendors · loyalty
+//     · disputes · compliance · notifications · media · geo · chat · verticals)
+const platformAuth = { sessions: new SessionStore(), refresh: new RefreshManager(), audit: new AuditLog() };
+const walletsSvc = new WalletService();
+const paymentsSvc = new PaymentService(
+  { paystack: process.env.PAYSTACK_SECRET ?? 'pk_test_demo', flutterwave: process.env.FLW_SECRET ?? 'fw_test_demo', monnify: process.env.MONNIFY_SECRET ?? 'mn_test_demo' },
+  { onSettled: (ref, amt) => { const w = walletsSvc.byUser(ref.split(':')[0]); if (w) walletsSvc.topup(w, amt, `psp:${ref}`); }, onRefunded: () => undefined },
+);
+const travelSvc = new TravelService();
+const vendorsSvc = new VendorService();
+const loyaltySvc = new LoyaltyService();
+const disputesSvc = new DisputeService({
+  refundCustomer: (ref, amt) => void { ref, amt },     // escrow bridge in prod
+  releaseVendor: (ref, amt) => void { ref, amt },
+});
+const kycSvc = new KycService();
+const privacySvc = new PrivacyService();
+const pciTracker = new PciTracker();
+const notificationsSvc = new NotificationService();
+const mediaSvc = new MediaService();
+const geoSvc = new GeoService();
+const signaling = new SignalingServer();
+const chatStore = new MessageStore();
+const smsGateway = new SmsGateway();
+const verticalEngines = new Map<string, VerticalEngine>();
+function verticalEngine(code: string): VerticalEngine {
+  if (!verticalEngines.has(code)) verticalEngines.set(code, new VerticalEngine(
+    { module: (m, ctx) => fams.evaluate('module', m, (ctx ?? { country: 'NG' }) as any).available },
+  ));
+  return verticalEngines.get(code)!;
+}
+for (const [code, providers] of [
+  ['aviation', [{ id: 'av_vipjets', name: 'VIP Jets NG', rating: 4.9 }, { id: 'av_ibom', name: 'Ibom Air Charter', rating: 4.2 }]],
+  ['hotels', [{ id: 'htl_eko', name: 'Eko Suites', rating: 4.7 }, { id: 'htl_george', name: 'The George', rating: 4.8 }]],
+  ['tourism', [{ id: 'tgp_1', name: 'AMSA Experiences', rating: 4.6 }]],
+  ['security', [{ id: 'sec_vg', name: 'Vanguard Security', rating: 4.8 }]],
+  ['roadside', [{ id: 'rsa_fix', name: 'FixIt Roadside', rating: 4.5 }]],
+  ['intercity', [{ id: 'ic_gigm', name: 'GIGM', rating: 4.3 }]],
+  ['marine', [{ id: 'mar_blue', name: 'Bluewater Marine', rating: 4.7 }]],
+  ['corporate_services', [{ id: 'corp_am', name: 'AMSA Corporate', rating: 4.9 }]],
+] as const) {
+  const e = verticalEngine(code);
+  for (const p of providers) e.register(code, p as any);
+}
+
+// auth
+app.post('/v1/auth/mfa/enroll', (req, res) => {
+  const secret = generateTotpSecret();
+  platformAuth.sessions.login(String(req.body?.userId ?? 'usr_anon'), { deviceId: 'mfa', userAgent: 'enroll', ip: req.ip ?? '0.0.0.0' });
+  res.status(201).json({ secret, otpauth: `otpauth://totp/AMSA:${req.body?.userId ?? 'usr'}?issuer=AMSA` });
+});
+app.post('/v1/auth/mfa/verify', (req, res) => {
+  const { secret, code } = req.body ?? {};
+  if (!secret || !code) return problem(res, 422, 'VALIDATION_FAILED', 'secret and code required');
+  const ok = verifyTotp(secret, String(code));
+  if (!ok) return problem(res, 401, 'MFA_FAILED', 'invalid TOTP code');
+  res.json({ verified: true });
+});
+app.get('/v1/auth/sessions/:userId', (req, res) => res.json({ sessions: platformAuth.sessions.listSessions(req.params.userId) }));
+app.post('/v1/auth/sessions/:id/revoke', (req, res) => { platformAuth.sessions.revoke(req.params.id); res.json({ revoked: true }); });
+app.post('/v1/auth/refresh', (req, res) => {
+  try { res.json(platformAuth.refresh.rotate(String(req.body?.userId), String(req.body?.refresh), { secret: 'amsa-demo' })); }
+  catch (e: any) { return problem(res, 401, 'REFRESH_REJECTED', e.message); }
+});
+
+// wallet
+app.post('/v1/wallets', (req, res) => res.status(201).json({ wallet: walletsSvc.open(String(req.body?.userId ?? 'usr_anon')) }));
+app.get('/v1/wallets/:id', (_req, res) => res.json({ statement: 'use /v1/wallets/me (demo)' }));
+app.post('/v1/wallets/:id/topup', (req, res) => {
+  const w = walletsSvc.get(req.params.id);
+  if (!w) return problem(res, 404, 'NOT_FOUND', 'wallet not found');
+  try { walletsSvc.topup(w, Number(req.body?.amountMinor ?? 0), String(req.body?.reference ?? `top_${Date.now()}`)); }
+  catch (e: any) { return problem(res, 422, 'WALLET_REFUSED', e.message); }
+  res.status(201).json({ statement: walletsSvc.statement(w) });
+});
+app.post('/v1/wallets/:id/transfer', (req, res) => {
+  const from = walletsSvc.get(req.params.id);
+  const to = walletsSvc.byUser(String(req.body?.toUserId ?? ''));
+  if (!from || !to) return problem(res, 404, 'NOT_FOUND', 'wallet(s) not found');
+  try { walletsSvc.transfer(from, to, Number(req.body?.amountMinor), String(req.body?.reference ?? `tr_${Date.now()}`)); }
+  catch (e: any) { return problem(res, 422, 'WALLET_REFUSED', e.message); }
+  res.json({ from: walletsSvc.statement(from), to: walletsSvc.statement(to) });
+});
+app.post('/v1/wallets/:id/withdraw', (req, res) => {
+  const w = walletsSvc.get(req.params.id);
+  if (!w) return problem(res, 404, 'NOT_FOUND', 'wallet not found');
+  try { walletsSvc.withdraw(w, Number(req.body?.amountMinor), String(req.body?.reference ?? `wd_${Date.now()}`)); }
+  catch (e: any) { return problem(res, 422, 'WALLET_REFUSED', e.message); }
+  res.json({ statement: walletsSvc.statement(w) });
+});
+
+// payments
+app.post('/v1/payments/initialize', (req, res) => {
+  const b = req.body ?? {};
+  if (!b.reference || !b.amountMinor || !b.email) return problem(res, 422, 'VALIDATION_FAILED', 'reference, amountMinor, email required');
+  try { res.status(201).json(paymentsSvc.initialize({ reference: String(b.reference), amountMinor: Number(b.amountMinor), currency: 'NGN', email: String(b.email), channel: b.channel })); }
+  catch (e: any) { return problem(res, 409, 'DUPLICATE_REFERENCE', e.message); }
+});
+app.post('/v1/payments/webhook/:psp', (req, res) => {
+  const raw = JSON.stringify(req.body ?? {});
+  const out = paymentsSvc.webhook(req.params.psp as any, raw, String(req.headers['x-paystack-signature'] ?? req.headers['verif-hash'] ?? req.headers['monnify-signature'] ?? 'none'), { reference: req.body?.reference, status: req.body?.status });
+  if (!out.accepted) return problem(res, 400, 'WEBHOOK_REJECTED', out.reason);
+  res.json(out);
+});
+app.post('/v1/payments/:reference/confirm', (req, res) => {
+  try { res.json({ payment: paymentsSvc.confirm(req.params.reference) }); }
+  catch (e: any) { return problem(res, 404, 'NOT_FOUND', e.message); }
+});
+app.post('/v1/payments/:reference/refund', (req, res) => {
+  try { res.json({ payment: paymentsSvc.refund(req.params.reference, req.body?.amountMinor) }); }
+  catch (e: any) { return problem(res, 422, 'REFUND_REFUSED', e.message); }
+});
+
+// travel
+app.post('/v1/travel/search', (req, res) => {
+  const b = req.body ?? {};
+  if (!b.origin || !b.destination || !b.departDate || !b.passengers) return problem(res, 422, 'VALIDATION_FAILED', 'origin, destination, departDate, passengers required');
+  res.json({ offers: travelSvc.search({ origin: b.origin, destination: b.destination, departDate: b.departDate, passengers: Number(b.passengers), cabin: b.cabin }) });
+});
+app.post('/v1/travel/book', (req, res) => {
+  const b = req.body ?? {};
+  try { res.status(201).json(travelSvc.book({ origin: b.origin, destination: b.destination, departDate: b.departDate, passengers: Number(b.passengers), cabin: b.cabin }, String(b.offerId), { payNow: b.payNow !== false })); }
+  catch (e: any) { return problem(res, 422, 'TRAVEL_REFUSED', e.message); }
+});
+app.post('/v1/travel/:pnr/cancel', (req, res) => {
+  try { res.json(travelSvc.cancel(req.params.pnr)); }
+  catch (e: any) { return problem(res, 422, 'CANCEL_REFUSED', e.message); }
+});
+
+// vendors (16 types / 11-step chain / subscriptions)
+app.post('/v1/vendors', (req, res) => {
+  const b = req.body ?? {};
+  try { res.status(201).json({ vendor: vendorsSvc.register(String(b.vendorId), b.type, b.name ?? b.vendorId) }); }
+  catch (e: any) { return problem(res, 422, 'VENDOR_REFUSED', e.message); }
+});
+app.post('/v1/vendors/:id/submit', (req, res) => { try { res.json({ vendor: vendorsSvc.submit(req.params.id) }); } catch (e: any) { return problem(res, 404, 'NOT_FOUND', e.message); } });
+app.post('/v1/vendors/:id/verification/:step', (req, res) => {
+  try { res.json({ vendor: vendorsSvc.decideStep(req.params.id, req.params.step as any, req.body?.decision ?? 'approved', String(req.body?.by ?? 'admin_1')) }); }
+  catch (e: any) { return problem(res, 422, 'VERIFICATION_REFUSED', e.message); }
+});
+app.get('/v1/vendors/:id', (req, res) => { try { res.json({ vendor: vendorsSvc.get(req.params.id), activatable: vendorsSvc.isActivatable(req.params.id) }); } catch (e: any) { return problem(res, 404, 'NOT_FOUND', e.message); } });
+app.post('/v1/vendors/:id/subscription', (req, res) => {
+  try { res.json({ vendor: vendorsSvc.setSubscription(req.params.id, req.body?.tier, req.body?.commissionOverridePct) }); }
+  catch (e: any) { return problem(res, 422, 'SUBSCRIPTION_REFUSED', e.message); }
+});
+
+// loyalty
+app.get('/v1/loyalty/:userId', (req, res) => res.json(loyaltySvc.statement(req.params.userId)));
+app.post('/v1/loyalty/earn', (req, res) => res.json(loyaltySvc.earn(String(req.body?.userId), Number(req.body?.amountMinor ?? 0))));
+app.post('/v1/loyalty/redeem', (req, res) => {
+  try { res.json(loyaltySvc.redeem(String(req.body?.userId), Number(req.body?.points))); }
+  catch (e: any) { return problem(res, 422, 'REDEEM_REFUSED', e.message); }
+});
+
+// disputes
+app.post('/v1/disputes', (req, res) => {
+  const b = req.body ?? {};
+  try { res.status(201).json({ dispute: disputesSvc.open({ subject: b.subject, subjectRef: b.subjectRef, reason: b.reason, openedBy: b.openedBy, againstVendor: b.againstVendor, amountInPlayMinor: Number(b.amountInPlayMinor ?? 0), evidence: b.evidence }) }); }
+  catch (e: any) { return problem(res, 422, 'DISPUTE_REFUSED', e.message); }
+});
+app.post('/v1/disputes/:id/:action(acknowledge|review|escalate)', (req, res) => {
+  try {
+    const a = req.params.action;
+    res.json({ dispute: a === 'acknowledge' ? disputesSvc.acknowledge(req.params.id, String(req.body?.officer ?? 'officer_1')) : a === 'review' ? disputesSvc.review(req.params.id) : disputesSvc.escalate(req.params.id) });
+  } catch (e: any) { return problem(res, 422, 'DISPUTE_REFUSED', e.message); }
+});
+app.post('/v1/disputes/:id/resolve', (req, res) => {
+  try { res.json({ dispute: disputesSvc.resolve(req.params.id, req.body?.resolution, String(req.body?.by ?? 'officer_1')) }); }
+  catch (e: any) { return problem(res, 422, 'RESOLUTION_REFUSED', e.message); }
+});
+app.post('/v1/disputes/:id/chargeback', (req, res) => {
+  try { res.json({ dispute: disputesSvc.chargeback(req.params.id, String(req.body?.psp ?? 'paystack'), Number(req.body?.feeMinor ?? 150_000)) }); }
+  catch (e: any) { return problem(res, 422, 'CHARGEBACK_REFUSED', e.message); }
+});
+
+// compliance
+app.post('/v1/compliance/kyc', (req, res) => res.status(201).json({ kyc: kycSvc.initiate(String(req.body?.userId ?? 'usr_anon'), String(req.body?.bvn ?? ''), String(req.body?.nin ?? '')) }));
+app.post('/v1/compliance/aml/screen', (req, res) => res.json({ screen: screen(String(req.body?.name ?? ''), Number(req.body?.transactionCount ?? 0), Number(req.body?.largeCashMinor ?? 0)) }));
+app.post('/v1/compliance/privacy/request', (req, res) => {
+  const b = req.body ?? {};
+  const r = privacySvc.request(String(b.userId ?? 'usr_anon'), b.type ?? 'access');
+  if (b.fulfillSystems) { privacySvc.verify(r.id); privacySvc.fulfill(r.id, b.fulfillSystems); }
+  res.status(201).json({ request: r });
+});
+app.get('/v1/compliance/pci', (_req, res) => res.json(pciTracker.readiness()));
+
+// notifications / media / geo / chat
+app.post('/v1/notifications/send', async (req, res) => {
+  const b = req.body ?? {};
+  try { res.json(await notificationsSvc.send({ userId: String(b.userId ?? 'usr_anon'), to: String(b.to ?? ''), channel: b.channel ?? 'fcm', template: b.template, vars: b.vars })); }
+  catch (e: any) { return problem(res, 422, 'NOTIFY_REFUSED', e.message); }
+});
+app.post('/v1/media/presign', (req, res) => {
+  const b = req.body ?? {};
+  try { res.status(201).json(mediaSvc.presign({ assetClass: b.assetClass, uploadedBy: String(b.uploadedBy ?? 'usr_anon'), filename: String(b.filename ?? ''), bytes: Number(b.bytes ?? 0) })); }
+  catch (e: any) { return problem(res, 422, 'PRESIGN_REFUSED', e.message); }
+});
+app.post('/v1/media/:uploadId/complete', (req, res) => {
+  try { res.json({ upload: mediaSvc.complete(req.params.uploadId) }); }
+  catch (e: any) { return problem(res, 422, 'UPLOAD_REFUSED', e.message); }
+});
+app.get('/v1/geo/geocode', (req, res) => res.json(geoSvc.geocode(String(req.query.q ?? ''))));
+app.get('/v1/geo/route', (req, res) => {
+  const f = String(req.query.from ?? '6.5,3.4').split(',').map(Number);
+  const t = String(req.query.to ?? '9.1,7.4').split(',').map(Number);
+  res.json(geoSvc.route({ lat: f[0], lng: f[1] }, { lat: t[0], lng: t[1] }));
+});
+app.post('/v1/chat/rooms', (req, res) => res.status(201).json({ roomId: signaling.createRoom(req.body?.moderators ?? []) }));
+app.post('/v1/chat/rooms/:id/join', (req, res) => {
+  try { res.json(signaling.join(req.params.id, String(req.body?.participant ?? ''))); } catch (e: any) { return problem(res, 422, 'ROOM_REFUSED', e.message); }
+});
+app.post('/v1/chat/rooms/:id/signal', (req, res) => {
+  const b = req.body ?? {};
+  try { res.status(201).json(signaling.signal({ roomId: req.params.id, from: String(b.from ?? ''), to: String(b.to ?? ''), kind: b.kind, encryptedPayload: String(b.encryptedPayload ?? '') })); }
+  catch (e: any) { return problem(res, 422, 'SIGNAL_REFUSED', e.message); }
+});
+app.post('/v1/sms/send', async (req, res) => {
+  try { res.json(await smsGateway.send(String(req.body?.to ?? ''), String(req.body?.body ?? ''))); }
+  catch (e: any) { return problem(res, 422, 'SMS_REFUSED', e.message); }
+});
+
+// verticals
+app.get('/v1/verticals/catalog', (_req, res) => res.json({
+  aviation: { aircraftTypes: AIRCRAFT_TYPES },
+  hotels: { roomTypes: ROOM_TYPES },
+  tourism: { experiences: EXPERIENCES },
+  security: { services: SECURITY_SERVICES },
+  roadside: { services: ROADSIDE_RATES },
+  intercity: { routes: INTERCITY_ROUTES },
+  marine: { vessels: MARINE_VESSELS },
+  corporate: { services: CORPORATE_SERVICES },
+}));
+app.post('/v1/verticals/:vertical/quote', (req, res) => {
+  const b = req.body ?? {};
+  try {
+    res.json({ quotes: verticalEngine(req.params.vertical).quote(req.params.vertical, {
+      customerId: String(b.customerId ?? 'cus_anon'),
+      priceOf: (p) => Number(b.basePriceMinor ?? 5_000_000) * (6 - Math.round(p.rating)),
+      etaOf: () => String(b.schedule ?? 'T+2h'),
+      famsCtx: { country: b.country ?? 'NG', state: b.state, userGroups: ['customers'] },
+    }) });
+  } catch (e: any) { return problem(res, 403, 'FEATURE_DISABLED', e.message); }
+});
+app.post('/v1/verticals/:vertical/book', (req, res) => {
+  const b = req.body ?? {};
+  try {
+    res.status(201).json({ booking: verticalEngine(req.params.vertical).book(req.params.vertical, {
+      providerId: String(b.providerId ?? ''), customerId: String(b.customerId ?? 'cus_anon'),
+      priceMinor: Number(b.priceMinor ?? 5_000_000), details: b.details ?? {},
+      famsCtx: { country: b.country ?? 'NG', state: b.state, userGroups: ['customers'] },
+    }) });
+  } catch (e: any) { return problem(res, 403, 'BOOKING_REFUSED', e.message); }
+});
 // ─── WhatsApp Smart AI Customer Service Platform (docs/26) ──────────────────
+app.post('/v1/verticals/bookings/:id/:action(complete|cancel)', (req, res) => {
+  const engine = [...verticalEngines.values()].find((e) => e.get(req.params.id));
+  if (!engine) return problem(res, 404, 'NOT_FOUND', 'booking not found');
+  try { res.json({ booking: req.params.action === 'complete' ? engine.complete(req.params.id) : engine.cancel(req.params.id) }); }
+  catch (e: any) { return problem(res, 422, 'BOOKING_REFUSED', e.message); }
+});
+
 app.get('/webhooks/whatsapp', wa.verifyWebhook);
 app.post('/webhooks/whatsapp', express.raw({ type: '*/*' }) as any, (req, res) => {
   // body may arrive as raw buffer when signature middleware is enabled
