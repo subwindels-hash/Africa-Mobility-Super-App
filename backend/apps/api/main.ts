@@ -15,10 +15,23 @@
  *   GET  /v1/bookings/:id
  *   GET  /v1/wallets/me
  *   GET  /v1/health
+ *
+ * FAMS — Feature Activation Management System (docs/28), no deploy needed:
+ *   GET/POST /v1/feature-flags · PUT/DELETE /v1/feature-flags/:id
+ *   GET/POST /v1/service-availability · PUT /v1/service-availability/:id
+ *   GET/POST /v1/fams/emergency      (kill switch)
+ *   GET/POST /v1/fams/schedules · POST /v1/fams/tick (time-based activation)
+ *   GET  /v1/fams/rules · /v1/fams/health
+ *   → Feature Activation Middleware guards /v1/bookings* (403 + canonical message)
  */
 import express, { type Request, type Response, type NextFunction } from 'express';
 import * as core from '../../libs/core/src/index';
 import * as wa from '../../libs/whatsapp/src/index';
+import {
+  FamsEngine, type FamsRule, type FamsValue, type FamsLevel, type FamsContext, type FamsTargetKind,
+  PLATFORM_MODULES, VERTICAL_MODULE, CATEGORY_VERTICAL, PHASES,
+  CITY_STATE, STATE_NAMES, countryFromPhone, UNAVAILABLE_MESSAGE, ensureSeeded,
+} from '../../libs/fams/src/index';
 
 interface AppUser {
   id: string; phone: string; role: 'customer' | 'driver' | 'vendor'; name: string;
@@ -38,6 +51,42 @@ app.use(express.json());
 
 const problem = (res: Response, status: number, code: string, message: string, details?: unknown) =>
   res.status(status).json({ type: 'about:blank', title: code, status, code, message, details, traceId: `tr_${Math.random().toString(36).slice(2, 10)}` });
+
+// ─── FAMS — Feature Activation Management System (docs/28) ───────────────────
+// Admins activate/deactivate/hide/roll out services, locations, features, vendors
+// and assets WITHOUT software updates. The engine gates every request:
+//   User Request → Feature Activation Engine → Location Validation →
+//   Feature Flag Validation → Vendor Availability Validation → Booking Engine
+const fams = ensureSeeded();
+
+/** Parse a FAMS context from query/body (location validation). */
+function famsCtxFrom(src: Record<string, any>): FamsContext {
+  const city = typeof src?.city === 'string' ? src.city : undefined;
+  const state = typeof src?.state === 'string' ? src.state : city ? CITY_STATE[city] : undefined;
+  return {
+    country: typeof src?.country === 'string' ? src.country : 'NG',
+    state, city,
+    vendorId: src?.vendorId, assetId: src?.assetId,
+    userGroups: Array.isArray(src?.userGroups) ? src.userGroups : ['customers'],
+    userId: src?.userId,
+  };
+}
+
+/**
+ * Feature Activation Middleware — wraps the booking engine. When the engine
+ * says OFF the caller gets the canonical message and a 403 — before pricing,
+ * dispatch or escrow.
+ */
+const famsMiddleware = (vertical = 'transportation') => (req: Request, res: Response, next: NextFunction) => {
+  const ctx = famsCtxFrom(req.body ?? {});
+  const decision = fams.evaluate('vertical', vertical, ctx);
+  if (!decision.available) {
+    return problem(res, 403, 'SERVICE_UNAVAILABLE', UNAVAILABLE_MESSAGE, { service: vertical, context: ctx, decision });
+  }
+  (req as any).fams = { decision, ctx };
+  next();
+};
+app.use(['/v1/bookings', '/v1/bookings/estimate'], famsMiddleware('transportation'));
 
 // --- auth-lite (demo): OTP fixed at 123456, HMAC-ish opaque token ---
 app.post('/v1/auth/otp', (req, res) => {
@@ -171,6 +220,147 @@ app.get('/v1/wallets/me', auth, (req: any, res) => {
 });
 
 app.get('/v1/health', (_req, res) => res.json({ ok: true, service: 'amsa-api', version: '1.1.0', time: new Date().toISOString() }));
+
+// ─── FAMS — Feature Activation Management System (docs/28) ───────────────────
+// Admins activate/deactivate/hide/roll out services, locations, features, vendors
+// and assets WITHOUT software updates. The engine below gates every request:
+//   User Request → Feature Activation Engine → Location Validation →
+//   Feature Flag Validation → Vendor Availability Validation → Booking Engine
+const FAMS_VALUES: FamsValue[] = ['on', 'off', 'hidden', 'maintenance', 'beta'];
+const FAMS_LEVELS: FamsLevel[] = ['global', 'country', 'state', 'city', 'category', 'vendor', 'asset'];
+
+function parseRuleBody(body: any, res: Response): Partial<FamsRule> | null {
+  const value = body?.value as FamsValue;
+  const level = body?.level as FamsLevel;
+  if (!value || !FAMS_VALUES.includes(value)) { problem(res, 422, 'VALIDATION_FAILED', `value must be one of ${FAMS_VALUES.join('|')}`); return null; }
+  if (level !== undefined && !FAMS_LEVELS.includes(level)) { problem(res, 422, 'VALIDATION_FAILED', `level must be one of ${FAMS_LEVELS.join('|')}`); return null; }
+  if (!body?.target?.kind || !body?.target?.code) { problem(res, 422, 'VALIDATION_FAILED', 'target {kind: module|vertical|category|feature, code} required'); return null; }
+  return {
+    level: level ?? 'global', selector: body.selector,
+    target: { kind: body.target.kind as FamsTargetKind, code: String(body.target.code) },
+    value,
+    userGroups: body.userGroups, rolloutPct: body.rolloutPct,
+    startsAt: body.startsAt ? new Date(body.startsAt) : undefined,
+    endsAt: body.endsAt ? new Date(body.endsAt) : undefined,
+    geofence: body.geofence, note: body.note, updatedBy: body.updatedBy ?? 'admin_api',
+  };
+}
+
+/** Feature-flag routes — spec: GET/POST/PUT/DELETE /feature-flags. */
+app.get('/v1/feature-flags', (req, res) => {
+  const ctx = famsCtxFrom(req.query as any);
+  const flags = ['ai_dynamic_pricing', 'whatsapp_ai_assistant', 'video_calling', 'wallet', 'escrow'];
+  const rules = fams.listRules().filter((r) => r.target.kind === 'feature');
+  res.json({
+    flags: flags.map((code) => ({ code, ...fams.evaluate('feature', code, ctx) })),
+    rules,
+    context: ctx,
+  });
+});
+
+app.post('/v1/feature-flags', auth, (req: any, res) => {
+  const parsed = parseRuleBody({ ...req.body, target: { kind: 'feature', code: req.body?.code ?? req.body?.target?.code } }, res);
+  if (!parsed) return;
+  const rule = fams.upsertRule(parsed as any);
+  const effectCtx = famsCtxFrom({
+    ...req.body,
+    country: rule.level === 'country' ? rule.selector : req.body?.country,
+    state: rule.level === 'state' ? rule.selector : undefined,
+    city: rule.level === 'city' ? rule.selector : undefined,
+  });
+  res.status(201).json({ rule, effect: fams.evaluate('feature', rule.target.code, effectCtx) });
+});
+
+app.put('/v1/feature-flags/:id', auth, (req: any, res) => {
+  const existing = fams.listRules().find((r) => r.id === req.params.id);
+  if (!existing) return problem(res, 404, 'NOT_FOUND', 'Feature flag rule not found');
+  const parsed = parseRuleBody({ ...existing, ...req.body, target: existing.target }, res);
+  if (!parsed) return;
+  const rule = fams.upsertRule({ ...(parsed as any), id: existing.id, updatedBy: req.body?.updatedBy ?? 'admin_api' });
+  res.json({ rule });
+});
+
+app.delete('/v1/feature-flags/:id', auth, (req: any, res) => {
+  const ok = fams.deleteRule(req.params.id);
+  if (!ok) return problem(res, 404, 'NOT_FOUND', 'Feature flag rule not found');
+  res.status(204).end();
+});
+
+/** Service availability — spec: GET/POST/PUT /service-availability. */
+app.get('/v1/service-availability', (req, res) => {
+  const ctx = famsCtxFrom(req.query as any);
+  const verticals = ['transportation', 'logistics', 'travel', 'aviation', 'security', 'accommodation', 'roadside', 'corporate_services'];
+  const matrix = fams.availabilityMatrix(ctx, verticals);
+  res.json({
+    context: ctx,
+    location: { city: ctx.city, state: ctx.state ? STATE_NAMES[ctx.state] ?? ctx.state : undefined, country: ctx.country },
+    services: Object.entries(matrix).map(([code, d]) => ({
+      service: code, ...d,
+    })),
+    features: ['ai_dynamic_pricing', 'whatsapp_ai_assistant', 'video_calling', 'wallet', 'escrow']
+      .map((code) => ({ service: code, ...fams.evaluate('feature', code, ctx) })),
+  });
+});
+
+app.post('/v1/service-availability', auth, (req: any, res) => {
+  const parsed = parseRuleBody({ level: 'city', ...req.body, target: { kind: 'vertical', code: req.body?.service ?? req.body?.target?.code } }, res);
+  if (!parsed) return;
+  const rule = fams.upsertRule(parsed as any);
+  res.status(201).json({ rule, effect: fams.evaluate('vertical', rule.target.code, famsCtxFrom({ ...req.body, city: rule.level === 'city' ? rule.selector : req.body?.city })) });
+});
+
+app.put('/v1/service-availability/:id', auth, (req: any, res) => {
+  const existing = fams.listRules().find((r) => r.id === req.params.id);
+  if (!existing) return problem(res, 404, 'NOT_FOUND', 'Availability rule not found');
+  const parsed = parseRuleBody({ ...existing, ...req.body, target: existing.target }, res);
+  if (!parsed) return;
+  const rule = fams.upsertRule({ ...(parsed as any), id: existing.id, updatedBy: req.body?.updatedBy ?? 'admin_api' });
+  res.json({ rule });
+});
+
+/** Full rule catalog + reference data (dashboard source of truth). */
+app.get('/v1/fams/rules', (_req, res) => {
+  res.json({
+    rules: fams.listRules(),
+    modules: PLATFORM_MODULES,
+    verticalModule: VERTICAL_MODULE,
+    categoryVertical: CATEGORY_VERTICAL,
+    phases: PHASES,
+    cities: Object.keys(CITY_STATE).map((city) => ({ code: city, state: CITY_STATE[city], stateName: STATE_NAMES[CITY_STATE[city]] })),
+  });
+});
+
+/** Emergency kill switch — instant, no deploy. */
+app.get('/v1/fams/emergency', (_req, res) => res.json({ active: fams.listEmergencies() }));
+
+app.post('/v1/fams/emergency', auth, (req: any, res) => {
+  const { target, on = true, by, reason } = req.body ?? {};
+  if (!target || !/:/.test(String(target))) return problem(res, 422, 'VALIDATION_FAILED', 'target required as kind:code, e.g. vertical:aviation');
+  fams.setEmergency(String(target), Boolean(on), by ?? req.userId, reason ?? 'emergency shutdown');
+  res.status(on ? 201 : 200).json({ target, on: Boolean(on), active: fams.listEmergencies().map((e) => e.targetKey) });
+});
+
+/** Scheduled activations (time-based) + scheduler tick. */
+app.get('/v1/fams/schedules', (_req, res) => res.json({ schedules: fams.listSchedules() }));
+
+app.post('/v1/fams/schedules', auth, (req: any, res) => {
+  const b = req.body ?? {};
+  if (!b.runAt || !b.target?.code) return problem(res, 422, 'VALIDATION_FAILED', 'runAt and target.code required');
+  const s = fams.schedule({
+    action: b.action ?? 'set_value',
+    level: b.level ?? 'global', selector: b.selector,
+    target: { kind: b.target.kind ?? 'vertical', code: String(b.target.code) },
+    value: b.value, runAt: new Date(b.runAt), note: b.note,
+  } as any);
+  res.status(201).json({ schedule: s });
+});
+
+app.post('/v1/fams/tick', (_req, res) => {
+  const applied = fams.tick();
+  res.json({ applied: applied.length, schedules: applied });
+});
+
+app.get('/v1/fams/health', (_req, res) => res.json({ ok: true, rules: fams.listRules().length, emergencies: fams.listEmergencies().length, schedules: fams.listSchedules().length }));
 
 // ─── WhatsApp Smart AI Customer Service Platform (docs/26) ──────────────────
 app.get('/webhooks/whatsapp', wa.verifyWebhook);

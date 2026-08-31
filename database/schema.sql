@@ -1613,6 +1613,156 @@ LEFT JOIN whatsapp.messages m ON m.conversation_id = c.id
 GROUP BY c.id;
 
 -- ============================================================================
+-- FAMS — FEATURE ACTIVATION MANAGEMENT SYSTEM (docs/28, migration 004)
+-- Centralized activation control without software updates. Precedence:
+-- asset(70) > vendor(60) > category(50) > city(40) > state(30) > country(20)
+-- > global(10), +15 for user-group-scoped rules; kill switch overrides all.
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS fams;
+
+CREATE TABLE fams.services (                     -- every module/vertical/category/feature, built day one
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT UNIQUE NOT NULL,                     -- module.transportation, ride.vip, feature.wallet
+  kind TEXT NOT NULL CHECK (kind IN ('module','vertical','category','feature')),
+  parent_code TEXT REFERENCES fams.services(code),
+  name TEXT NOT NULL,
+  icon TEXT,
+  default_value TEXT NOT NULL DEFAULT 'on' CHECK (default_value IN ('on','off','hidden','maintenance','beta')),
+  phase INT NOT NULL DEFAULT 1,                  -- launch phase 1..5
+  sort_order INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE fams.states (                       -- sub-country control layer
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT UNIQUE NOT NULL,                     -- NG-LAG, NG-ED, KE-NAI
+  country_code CHAR(2) NOT NULL REFERENCES geo.countries(code),
+  name TEXT NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fams_states_country ON fams.states(country_code);
+
+CREATE TABLE fams.feature_flags (                -- engine-native rules: scope, window, geofence, rollout
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  level TEXT NOT NULL DEFAULT 'global' CHECK (level IN ('global','country','state','city','category','vendor','asset')),
+  selector TEXT,                                 -- NG, NG-ED, NG-BEN, ride.vip, vnd_.., ast_..
+  value TEXT NOT NULL CHECK (value IN ('on','off','hidden','maintenance','beta')),
+  user_groups TEXT[] NOT NULL DEFAULT '{}',      -- customers|vendors|corporate|beta|vip ({} = everyone)
+  rollout_pct NUMERIC(5,2),                      -- deterministic % of user ids
+  starts_at TIMESTAMPTZ,                         -- activate 01 Jan 2027
+  ends_at TIMESTAMPTZ,                           -- deactivate 31 Jan 2027
+  geofence JSONB,                                -- {"lat":6.5774,"lng":3.3212,"radiusM":15000}
+  note TEXT,
+  updated_by UUID REFERENCES identity.users(id),
+  version BIGINT NOT NULL DEFAULT 1,             -- monotonic recency tie-break
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fams_flags_service ON fams.feature_flags(service_code);
+CREATE INDEX idx_fams_flags_level_sel ON fams.feature_flags(level, selector);
+
+CREATE TABLE fams.service_availability (         -- country/state/city gates
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  level TEXT NOT NULL CHECK (level IN ('global','country','state','city')),
+  selector TEXT NOT NULL,                        -- NG | NG-ED | NG-BEN
+  value TEXT NOT NULL CHECK (value IN ('on','off','hidden','maintenance','beta')),
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMPTZ,
+  note TEXT,
+  updated_by UUID,
+  version BIGINT NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (service_code, level, selector)
+);
+CREATE INDEX idx_fams_avail_lookup ON fams.service_availability(service_code, selector);
+
+CREATE TABLE fams.feature_rollouts (             -- phased launch + user-group activation
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  phase INT NOT NULL CHECK (phase BETWEEN 1 AND 5),
+  user_groups TEXT[] NOT NULL DEFAULT '{customers}',
+  rollout_pct NUMERIC(5,2) NOT NULL DEFAULT 100 CHECK (rollout_pct BETWEEN 0 AND 100),
+  countries TEXT[] NOT NULL DEFAULT '{}',
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMPTZ,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE fams.vendor_activation (            -- Active/Suspended/Pending Review/Maintenance
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id UUID NOT NULL REFERENCES vendor.vendors(id),
+  vendor_code TEXT UNIQUE NOT NULL,              -- vnd_a, vnd_b (engine key)
+  state TEXT NOT NULL DEFAULT 'pending_review'
+    CHECK (state IN ('active','suspended','pending_review','maintenance')),
+  reason TEXT,
+  countries TEXT[] NOT NULL DEFAULT '{}',
+  scheduled_resume_at TIMESTAMPTZ,
+  updated_by UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fams_vendor_state ON fams.vendor_activation(state);
+
+CREATE TABLE fams.asset_activation (             -- vehicle/motorcycle/helicopter/jet/boat
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  asset_code TEXT UNIQUE NOT NULL,               -- ast_jet_b, or class 'helicopter'
+  asset_type TEXT NOT NULL CHECK (asset_type IN ('vehicle','motorcycle','helicopter','jet','boat')),
+  asset_id UUID,
+  service_code TEXT REFERENCES fams.services(code),
+  value TEXT NOT NULL DEFAULT 'on' CHECK (value IN ('on','off','hidden','maintenance','beta')),
+  countries TEXT[] NOT NULL DEFAULT '{}',
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMPTZ,
+  note TEXT,
+  updated_by UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE fams.scheduled_activations (        -- time-based activation (cron applies due rows)
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  action TEXT NOT NULL DEFAULT 'set_value' CHECK (action IN ('set_value','emergency_stop','emergency_clear')),
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  level TEXT NOT NULL DEFAULT 'global' CHECK (level IN ('global','country','state','city','category','vendor','asset')),
+  selector TEXT,
+  value TEXT,
+  run_at TIMESTAMPTZ NOT NULL,                   -- e.g. activate 2027-01-01, deactivate 2027-01-31
+  executed_at TIMESTAMPTZ,
+  note TEXT,
+  created_by UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fams_sched_due ON fams.scheduled_activations(executed_at, run_at);
+
+CREATE TABLE fams.emergency_stops (              -- kill switch, no deploy, overrides every rule
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  target_key TEXT UNIQUE NOT NULL,               -- 'vertical:aviation', 'module:wallet'
+  reason TEXT NOT NULL,
+  stopped_by UUID NOT NULL,
+  stopped_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  cleared_at TIMESTAMPTZ
+);
+
+CREATE TABLE fams.audit_log (                    -- every activation change, trail-logged
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  actor_id UUID NOT NULL,
+  actor_role TEXT NOT NULL,
+  action TEXT NOT NULL,                          -- rule.upsert, rule.delete, emergency.on...
+  target TEXT NOT NULL,
+  before JSONB,
+  after JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fams_audit_target ON fams.audit_log(target, created_at DESC);
+
+-- ============================================================================
 -- ROW-LEVEL SECURITY EXAMPLE (multi-tenant isolation for future split)
 -- ============================================================================
 ALTER TABLE booking.bookings ENABLE ROW LEVEL SECURITY;

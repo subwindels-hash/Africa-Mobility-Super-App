@@ -19,6 +19,62 @@ import {
 } from './dialog';
 import { createPaymentLink, paymentLinkText } from './payments';
 import { money } from '../../core/src/domain/types';
+import { CITY_STATE, countryFromPhone, ensureSeeded, UNAVAILABLE_MESSAGE, type FamsContext, type FamsDecision } from '../../fams/src/index';
+
+const fams = ensureSeeded(); // Feature Activation Management System — Ada obeys it
+
+const VERTICAL_DISPLAY: Record<string, { icon: string; label: string }> = {
+  transportation: { icon: '🚗', label: 'Rides (economy → luxury → chauffeur)' },
+  logistics: { icon: '📦', label: 'Deliveries & dispatch' },
+  travel: { icon: '✈️', label: 'Flights' },
+  aviation: { icon: '🚁', label: 'Private charters & jets' },
+  security: { icon: '🛡', label: 'Verified security services' },
+  accommodation: { icon: '🏨', label: 'Hotels & short-lets' },
+  roadside: { icon: '🛠', label: 'Roadside assistance' },
+  corporate_services: { icon: '🏢', label: 'Corporate services' },
+};
+
+/** Build a FAMS context from the session + detected places. */
+function famsContextFor(phone: string, placeCityCode?: string): FamsContext {
+  const country = countryFromPhone(phone);
+  const city = placeCityCode?.startsWith('NG-') || placeCityCode?.startsWith('KE-') || placeCityCode?.startsWith('GH-') ? placeCityCode : undefined;
+  return {
+    country,
+    state: city ? CITY_STATE[city] : undefined,
+    city,
+    userGroups: ['customers'],
+    userId: phone,
+  };
+}
+
+/** FAMS gate for a booking vertical — returns the unavailable reply or null. */
+function famsGate(phone: string, vertical: string, cityCode?: string, categoryCode?: string): { reply: string; meta: any } | null {
+  const ctx = famsContextFor(phone, cityCode);
+  const decision = fams.evaluate('vertical', vertical, ctx);
+  if (!decision.available) return { reply: unavailableText(vertical, decision, ctx), meta: { node: 'greeting', fams: 'blocked', reason: decision.reason } };
+  if (categoryCode) {
+    const cat = fams.evaluate('category', categoryCode, ctx);
+    if (!cat.available) return { reply: unavailableText(vertical, cat, ctx), meta: { node: 'greeting', fams: 'blocked', reason: cat.reason } };
+  }
+  return null;
+}
+
+function unavailableText(vertical: string, d: FamsDecision, ctx: FamsContext): string {
+  const where = [ctx.city, ctx.state, ctx.country].filter(Boolean).join(' / ');
+  const display = VERTICAL_DISPLAY[vertical]?.label ?? vertical;
+  const state = d.value === 'maintenance' ? 'is under maintenance right now' : d.value === 'hidden' ? 'is not offered here yet' : 'is currently switched off';
+  const enabled = Object.entries(VERTICAL_DISPLAY)
+    .filter(([v]) => fams.verticalAvailable(v, ctx))
+    .map(([, x]) => `${x.icon} ${x.label.split(' (')[0]}`)
+    .slice(0, 5);
+  return [
+    `🚫 *${display}* ${state}${where ? ` in ${where}` : ''}.`,
+    '',
+    `_${UNAVAILABLE_MESSAGE}_`,
+    d.reason ? `(${d.reason})` : '',
+    enabled.length ? `Right now I *can* help you with: ${enabled.join(' · ')}` : '',
+  ].filter(Boolean).join('\n');
+}
 
 export interface InboundMessage {
   from: string;                        // WhatsApp phone (msisdn)
@@ -33,7 +89,7 @@ export interface InboundMessage {
 export interface OutboundMessage {
   to: string;
   text: string;
-  meta?: { intent?: string; confidence?: number; node?: string; escalated?: boolean; bookingId?: string };
+  meta?: { intent?: string; confidence?: number; node?: string; escalated?: boolean; bookingId?: string; fams?: string; reason?: string };
 }
 
 export interface OrchestratorStats {
@@ -160,10 +216,22 @@ async function route(phone: string, session: WaSession, nlu: NluResult, rawText:
   }
 
   switch (nlu.intent) {
-    case 'greeting':
+    case 'greeting': {
       session.node = 'greeting';
       stats.aiResolved++;
-      return { to: phone, text: greetingText(session.language), meta };
+      const ctx = famsContextFor(phone);
+      const enabledList = Object.entries(VERTICAL_DISPLAY)
+        .filter(([v]) => fams.verticalAvailable(v, ctx))
+        .map(([, x]) => `${x.icon} ${x.label}`)
+        .join('\n');
+      const text =
+        session.language === 'pcm'
+          ? `How far! 🙌 I be *Ada*, your AMSA assistant.\n\nWetin dey available today:\n${enabledList}\n\n💳 Wallet, payment & tracking too.\n\n*Wetin I go do for you?*`
+          : session.language === 'en'
+            ? `Hello and welcome! 🙌 I'm *Ada*, your AMSA assistant.\n\nHere's what's live on AMSA today:\n${enabledList}\n\n💳 Wallet, payments & tracking too.\n\n*How may I assist you today?*`
+            : greetingText(session.language);
+      return { to: phone, text, meta };
+    }
 
     case 'track_order': {
       stats.aiResolved++;
@@ -199,14 +267,19 @@ async function route(phone: string, session: WaSession, nlu: NluResult, rawText:
 
     case 'check_availability': {
       stats.aiResolved++;
-      const city = matchPlace(rawText)?.name ?? 'your city';
+      const place = matchPlace(rawText);
+      const city = place?.name ?? 'your city';
+      const ctx = famsContextFor(phone, place?.city);
+      const servicesHere = Object.entries(VERTICAL_DISPLAY)
+        .filter(([v]) => fams.verticalAvailable(v, ctx))
+        .map(([, x]) => `${x.icon} ${x.label.split(' (')[0]}`)
+        .join(' · ');
       const text = [
         '🗺 *Where AMSA is available*',
         '',
         '*Live now (10 cities):* Lagos · Abuja · Port Harcourt · Benin City · Asaba · Enugu · Awka · Onitsha · Kano · Ibadan',
         '',
-        `*Services in ${city}:* 🚗 rides · 📦 dispatch & delivery · ✈️ flights · 🏨 hotels & short-lets · 🛡 verified security · 🛠 roadside assistance`,
-        '🚁 private charters & ⚓ marine operate nationwide from Lagos / Abuja / Port Harcourt.',
+        `*Services in ${city}:* ${servicesHere || 'none — switch to a nearby city'}`,
         '',
         'Coming next: Accra 🇬🇭 · Nairobi 🇰🇪 · Johannesburg 🇿🇦.',
         `Want me to book something in *${city}* right now?`,
@@ -245,7 +318,13 @@ async function route(phone: string, session: WaSession, nlu: NluResult, rawText:
       return escalate(phone, session, meta);
   }
 
-  // booking intents — continue or start draft
+  // booking intents — FAMS gate first (AI respects activation settings), then draft
+  if (nlu.vertical) {
+    const place = matchPlace(rawText);
+    const cityCode = place?.city;
+    const gated = famsGate(phone, nlu.vertical, cityCode, nlu.entities.serviceClass);
+    if (gated) return { to: phone, text: gated.reply, meta: gated.meta };
+  }
   if (!session.draft || session.draft.intent !== nlu.intent) {
     startDraft(nlu, session);
   } else {
@@ -275,6 +354,15 @@ export function handleConfirmation(phone: string, session: WaSession, raw: strin
   if (session.node !== 'confirm') return null;
   const draft = session.draft!;
   if (/^(1|yes|y|confirm|ok|okay|book|yes abeg|i confirm)/i.test(raw.trim())) {
+    // final FAMS re-check at confirmation — the destination city may only be known now
+    const slotText = Object.values(draft.slots).filter(Boolean).join(' ');
+    const place = matchPlace(slotText);
+    const gated = famsGate(phone, draft.vertical, place?.city);
+    if (gated) {
+      session.draft = undefined;
+      session.node = 'greeting';
+      return { to: phone, text: gated.reply, meta: { node: 'greeting', fams: 'blocked', reason: gated.meta.reason } };
+    }
     const id = `BKG-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
     const totalMinor = draft.estimate?.range.min ?? draft.quote?.minMinor ?? 3_500_000;
     const vendor = pickVendorFor(draft);
