@@ -34,11 +34,16 @@
  *   GET /v1/shield/response · PUT /v1/shield/response/armed (kill-safe)
  *   GET /v1/shield/intel · POST /v1/shield/heal · POST /v1/shield/verify
  *   GET /v1/shield/compliance (SOC2·ISO27001·GDPR·NDPR·PCI DSS)
+ *
+ * ORGANISM — Global AI Organism Architecture (docs/30), 120,000+ agents:
+ *   GET /v1/organism/state · /layers · /graph · /decisions · /tasks · /evolution
+ *   POST /v1/organism/pulse  (one full intelligence cycle; SHIELD feeds it)
  */
 import express, { type Request, type Response, type NextFunction } from 'express';
 import * as core from '../../libs/core/src/index';
 import * as wa from '../../libs/whatsapp/src/index';
 import { shield } from '../../libs/shield/src/index';
+import { organism, TOTAL_AGENTS, LAYERS, fleetSummary, EXECUTIVE_CLUSTERS } from '../../libs/organism/src/index';
 import {
   FamsEngine, type FamsRule, type FamsValue, type FamsLevel, type FamsContext, type FamsTargetKind,
   PLATFORM_MODULES, VERTICAL_MODULE, CATEGORY_VERTICAL, PHASES, ASSET_TYPES, VENDOR_STATE_VALUE,
@@ -543,6 +548,43 @@ app.post('/v1/shield/verify', (req, res) => {
 });
 
 app.get('/v1/shield/compliance', (_req, res) => res.json(shield.compliance()));
+
+// ─── ORGANISM — Global AI Organism Architecture (docs/30) ────────────────────
+// 8 layers · 120,000+ agents · shared intelligence graph · AI executive board ·
+// autonomous execution · continuous evolution. One pulse = the full 7-step
+// intelligence flow; SHIELD feeds the security layer's posture into every cycle.
+app.get('/v1/organism/state', (_req, res) => res.json(organism.state()));
+
+app.get('/v1/organism/layers', (_req, res) =>
+  res.json({ total: TOTAL_AGENTS, layers: fleetSummary(), detail: LAYERS, executive: EXECUTIVE_CLUSTERS }));
+
+app.post('/v1/organism/pulse', (req, res) => {
+  const b = req.body ?? {};
+  // threat posture flows in from the security layer (SHIELD) unless overridden
+  const threatLevel = b.threatLevel ?? shield.soc().riskLevel as any;
+  const report = organism.pulse({
+    demandIndex: b.demandIndex, latencyMs: b.latencyMs, errorRate: b.errorRate,
+    threatLevel, revenueRunRateMinor: b.revenueRunRateMinor, costRunRateMinor: b.costRunRateMinor,
+    churnPct: b.churnPct, nps: b.nps, activeCustomers: b.activeCustomers,
+    vendorCount: b.vendorCount, fraudLossMinor: b.fraudLossMinor, aiCostPct: b.aiCostPct,
+  });
+  res.status(201).json(report);
+});
+
+app.get('/v1/organism/decisions', (_req, res) => {
+  const last = organism.history().at(-1);
+  res.json({ pulse: last?.pulseId ?? null, decisions: last?.decisions ?? [] });
+});
+
+app.get('/v1/organism/tasks', (_req, res) => {
+  const last = organism.history().at(-1);
+  res.json({ pulse: last?.pulseId ?? null, tasks: last?.tasks ?? [], results: last?.results ?? [] });
+});
+
+app.get('/v1/organism/evolution', (_req, res) =>
+  res.json({ adopted: organism.evolution.adopted, tunables: organism.tunables, history: organism.evolution.history() }));
+
+app.get('/v1/organism/graph', (_req, res) => res.json(organism.graph.stats()));
 
 // ─── WhatsApp Smart AI Customer Service Platform (docs/26) ──────────────────
 app.get('/webhooks/whatsapp', wa.verifyWebhook);

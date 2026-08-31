@@ -2067,6 +2067,131 @@ CREATE TABLE shield.compliance_reports (        -- SOC 2 / ISO 27001 / GDPR / ND
 );
 
 -- ============================================================================
+-- ORGANISM — GLOBAL AI ORGANISM ARCHITECTURE (docs/30, migration 008)
+-- 8 layers · 120,000+ agents · intelligence graph · executive decisions ·
+-- orchestrated execution · evolution experiments · feedback-tuned parameters.
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS organism;
+
+-- 1) Fleet topology — the canonical 8-layer / 120,000+ agent manifest
+CREATE TABLE organism.agent_fleets (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  layer TEXT NOT NULL CHECK (layer IN ('data_analysis','executive','security','operations','automation','product','orchestration','evolution')),
+  layer_name TEXT NOT NULL,
+  sub_swarm TEXT NOT NULL,
+  sub_swarm_name TEXT NOT NULL,
+  agents INT NOT NULL CHECK (agents > 0),
+  functions TEXT[] NOT NULL DEFAULT '{}',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (layer, sub_swarm)
+);
+CREATE INDEX idx_organism_fleets_layer ON organism.agent_fleets(layer);
+
+-- 2) Cognition pulses — one row per full intelligence cycle
+CREATE TABLE organism.pulses (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  pulse_key TEXT UNIQUE NOT NULL,               -- pulse_42 (engine handle)
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  duration_ms INT NOT NULL,
+  agents_total INT NOT NULL,
+  signals JSONB NOT NULL DEFAULT '{}',          -- demandIndex, latencyMs, threatLevel…
+  decisions INT NOT NULL DEFAULT 0,
+  tasks INT NOT NULL DEFAULT 0,
+  experiments INT NOT NULL DEFAULT 0,
+  tunables_after JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_organism_pulses_ts ON organism.pulses(ts DESC);
+
+-- 3) Shared intelligence graph — nodes (the cognitive substrate)
+CREATE TABLE organism.graph_nodes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  node_key TEXT UNIQUE NOT NULL,                -- kpi:demand, city:NG-LAG, threat:platform
+  kind TEXT NOT NULL CHECK (kind IN ('service','city','vertical','customer','vendor','payment','threat','infrastructure','model','kpi')),
+  label TEXT NOT NULL,
+  weight NUMERIC(12,3) NOT NULL DEFAULT 0,      -- recency-weighted importance
+  confidence NUMERIC(4,3) NOT NULL DEFAULT 0,   -- cross-agent agreement
+  observations INT NOT NULL DEFAULT 0,
+  last_seen TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_organism_nodes_weight ON organism.graph_nodes(weight DESC);
+
+-- 4) Graph observations — every agent contribution
+CREATE TABLE organism.graph_observations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  layer TEXT NOT NULL,
+  sub_swarm TEXT NOT NULL,
+  node_key TEXT NOT NULL REFERENCES organism.graph_nodes(node_key),
+  signal TEXT NOT NULL,
+  confidence NUMERIC(4,3) NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+  direction TEXT NOT NULL CHECK (direction IN ('up','down','flat')),
+  payload JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_organism_obs_node ON organism.graph_observations(node_key, ts DESC);
+
+-- 5) Executive decisions (AI board output, governance-validated)
+CREATE TABLE organism.executive_decisions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  decision_key TEXT UNIQUE NOT NULL,
+  pulse_id UUID REFERENCES organism.pulses(id),
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  cluster TEXT NOT NULL CHECK (cluster IN ('CEO','CFO','COO','CTO','CISO','CMO','CHRO','DATA_GOV')),
+  domain TEXT NOT NULL,
+  title TEXT NOT NULL,
+  rationale TEXT NOT NULL,
+  priority INT NOT NULL CHECK (priority BETWEEN 1 AND 5),
+  expected_impact TEXT NOT NULL,
+  confidence NUMERIC(4,3) NOT NULL,
+  validated BOOLEAN NOT NULL DEFAULT TRUE,      -- Data Governance sign-off
+  flags TEXT[] NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_organism_decisions_priority ON organism.executive_decisions(priority, ts DESC);
+
+-- 6) Orchestrated tasks + execution results
+CREATE TABLE organism.execution_tasks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  task_key TEXT UNIQUE NOT NULL,
+  decision_id UUID REFERENCES organism.executive_decisions(id),
+  kind TEXT NOT NULL CHECK (kind IN ('workflow','communication','task','microservice','business_process')),
+  title TEXT NOT NULL,
+  target TEXT NOT NULL,
+  params JSONB NOT NULL DEFAULT '{}',
+  priority INT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('queued','conflict_resolved','succeeded','failed')),
+  assigned_sub_swarm TEXT NOT NULL,
+  ok BOOLEAN,
+  duration_ms INT,
+  executed_at TIMESTAMPTZ
+);
+CREATE INDEX idx_organism_tasks_status ON organism.execution_tasks(status, executed_at DESC);
+
+-- 7) Evolution experiments (meta-learning / self-improvement / simulation / modeling)
+CREATE TABLE organism.evolution_experiments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  experiment_key TEXT UNIQUE NOT NULL,
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  kind TEXT NOT NULL CHECK (kind IN ('meta_learning','self_improvement','simulation','evolution_modeling')),
+  hypothesis TEXT NOT NULL,
+  tunable TEXT NOT NULL,                        -- which organism parameter moves
+  from_value TEXT NOT NULL,
+  to_value TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('proposed','adopted','rejected')),
+  measured_delta TEXT,
+  pulse_id UUID REFERENCES organism.pulses(id)
+);
+
+-- 8) Organism tunables — the live, evolution-managed configuration
+CREATE TABLE organism.tunables (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  latency_threshold_ms INT NOT NULL DEFAULT 800,
+  cost_budget_pct NUMERIC(4,2) NOT NULL DEFAULT 0.62,
+  threat_escalation TEXT NOT NULL DEFAULT 'elevated' CHECK (threat_escalation IN ('low','elevated','high','critical')),
+  churn_alarm_pct NUMERIC(5,2) NOT NULL DEFAULT 6,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by TEXT NOT NULL DEFAULT 'evolution-engine'
+);
+
+-- ============================================================================
 -- ROW-LEVEL SECURITY EXAMPLE (multi-tenant isolation for future split)
 -- ============================================================================
 ALTER TABLE booking.bookings ENABLE ROW LEVEL SECURITY;
