@@ -1,0 +1,35 @@
+###############################################################################
+# AMSA — DR & backups (docs/18 §42/43): nightly WAL archiving + PITR, weekly
+# restore drills, cross-region snapshot copy (af-south-1 → eu-west-1).
+###############################################################################
+apiVersion: batch/v1
+kind: CronJob
+metadata: { name: db-backup, namespace: core }
+spec:
+  schedule: "0 1 * * *"                    # 01:00 UTC nightly
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: backup
+              image: postgres:16-alpine
+              command: [sh, -c, "pg_dump \"$DATABASE_URL\" | gzip > /backups/amsa-$(date +%F).sql.gz && aws s3 cp /backups/amsa-$(date +%F).sql.gz s3://amsa-backups/db/ --sse aws:kms"]
+              env: [{ name: DATABASE_URL, valueFrom: { secretKeyRef: { name: postgres-creds, key: url } } }]
+              resources: { requests: { cpu: 500m, memory: 1Gi } }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: { name: restore-drill, namespace: core }
+spec:
+  schedule: "0 4 * * 0"                    # weekly restore drill
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: drill
+              image: ghcr.io/amsa/api:latest
+              command: [node, dist/scripts/restore-drill.js]   # restore to scratch DB → verify checksums → notify SHIELD

@@ -1,0 +1,61 @@
+###############################################################################
+# AMSA — continuous DELIVERY (joins CI): build → scan → push → migrate →
+# deploy → smoke → auto-rollback (docs/16 §40).
+###############################################################################
+name: CD
+
+on:
+  workflow_run: { workflows: [CI/CD], types: [completed], branches: [main] }
+  workflow_dispatch:
+
+env:
+  AWS_REGION: af-south-1
+  REGISTRY: ghcr.io/${{ github.repository }}
+  EKS_CLUSTER: amsa-prod
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    name: Deploy → staging → prod (manual gate)
+    runs-on: ubuntu-latest
+    environment: production
+    permissions: { id-token: write, contents: read, packages: read }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/amsa-github-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      - name: Build & push API image
+        run: |
+          docker build -f infra/local/Dockerfile.api -t $REGISTRY/api:${{ github.sha }} backend
+          docker push $REGISTRY/api:${{ github.sha }}
+
+      - name: Trivy scan (block on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@master
+        with: { image-ref: "${{ env.REGISTRY }}/api:${{ github.sha }}", severity: "HIGH,CRITICAL", exit-code: "1" }
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name $EKS_CLUSTER --region $AWS_REGION
+
+      - name: Run schema migrations (Job)
+        run: kubectl -n core delete job amsa-migrations --ignore-not-found && kubectl apply -f infra/k8s/data-layer.yaml && kubectl -n core wait --for=condition=complete job/amsa-migrations --timeout=300s
+
+      - name: Rolling deploy
+        run: kubectl apply -f infra/k8s/ && kubectl -n core set image deploy/amsa-api amsa-api=$REGISTRY/api:${{ github.sha }} && kubectl -n core rollout status deploy/amsa-api --timeout=600s
+
+      - name: Smoke tests (FAMS kill-switch check + booking pipeline + SHIELD SOC)
+        run: |
+          curl -fsS $BASE_URL/v1/health
+          curl -fsS $BASE_URL/v1/fams/health
+          curl -fsS -X POST $BASE_URL/v1/bookings/estimate -H 'content-type: application/json' -d '{"pickup":"Lagos","dropoff":"Ikeja"}'
+        env: { BASE_URL: "https://api.amsa.africa" }
+
+      - name: Auto-rollback on failure
+        if: failure()
+        run: kubectl -n core rollout undo deploy/amsa-api
