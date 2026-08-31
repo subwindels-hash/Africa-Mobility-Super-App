@@ -1,0 +1,2669 @@
+-- ============================================================================
+-- AFRICA MOBILITY SUPER APP (AMSA) — COMPLETE POSTGRESQL SCHEMA
+-- PostgreSQL 16+ · encoding UTF8 · timezone UTC
+-- Run order: this file is fully ordered and idempotent-safe on fresh DB.
+-- Conventions: UUID PKs, timestamptz everywhere, money = BIGINT minor units
+--              + currency CHAR(3) (ISO-4217), soft delete via deleted_at,
+--              multi-tenancy via country_code/city_code/currency columns.
+-- ============================================================================
+
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS postgis;        -- geometry for coverage/routes
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+-- CREATE EXTENSION IF NOT EXISTS timescaledb;  -- enable on telemetry host
+
+-- ============================================================================
+-- ENUM TYPES
+-- ============================================================================
+CREATE TYPE user_type AS ENUM ('customer','driver','dispatch_rider','vendor','fleet_owner','travel_agent','hotel_partner','security_provider','jet_operator','helicopter_operator','boat_operator','corporate_client','support_agent','admin','super_admin');
+CREATE TYPE kyc_level AS ENUM ('L1_PHONE','L2_IDENTITY','L3_ADDRESS','L4_BUSINESS');
+CREATE TYPE verification_status AS ENUM ('unverified','pending','in_review','verified','rejected','expired','auto_suspended');
+CREATE TYPE vendor_type AS ENUM ('taxi_operator','fleet_owner','luxury_vehicle_owner','chauffeur_company','dispatch_rider','logistics_company','courier_company','travel_agency','tour_operator','hotel','security_company','private_jet_operator','helicopter_operator','charter_company','boat_operator','corporate_service_provider');
+CREATE TYPE vendor_status AS ENUM ('draft','pending_verification','in_review','active','suspended','deactivated','banned');
+CREATE TYPE subscription_plan_tier AS ENUM ('free','standard','professional','enterprise');
+CREATE TYPE asset_type AS ENUM ('car_economy','car_standard','car_premium','car_vip','car_luxury','car_executive','car_suv','motorcycle_dispatch','motorcycle_delivery','private_jet','helicopter','charter_aircraft','air_ambulance','boat','yacht','water_taxi');
+CREATE TYPE asset_status AS ENUM ('pending_docs','active','in_trip','maintenance','suspended','retired');
+CREATE TYPE booking_type AS ENUM ('instant','scheduled','corporate','recurring','quote_based');
+CREATE TYPE service_vertical AS ENUM ('transportation','logistics','travel','aviation','marine','security','corporate_services','roadside','accommodation','tourism');
+CREATE TYPE booking_status AS ENUM ('draft','priced','requested','matched','confirmed','en_route','in_progress','completed','settled','cancelled','expired','disputed','refunded');
+CREATE TYPE booking_priority AS ENUM ('normal','priority','vip');
+CREATE TYPE payment_method_type AS ENUM ('wallet','card','bank_transfer','ussd','cash','corporate_account');
+CREATE TYPE payment_status AS ENUM ('initiated','pending','authorized','captured','failed','refunded','partially_refunded','chargeback_open','chargeback_lost','chargeback_won','cancelled');
+CREATE TYPE psp_provider AS ENUM ('paystack','flutterwave','monnify','internal','gds','insurance_partner');
+CREATE TYPE escrow_state AS ENUM ('authorized','funded','held','partially_released','released','dispute_hold','refunded','partially_refunded','expired');
+CREATE TYPE payout_status AS ENUM ('queued','processing','paid','failed','reversed','on_hold');
+CREATE TYPE dispute_status AS ENUM ('open','vendor_responded','under_review','awaiting_arbitration','resolved_customer','resolved_vendor','resolved_split','closed','escalated');
+CREATE TYPE refund_status AS ENUM ('requested','approved','processing','paid','rejected','reversed');
+CREATE TYPE wallet_type AS ENUM ('customer','vendor','driver','rider','corporate','platform_revenue','escrow','tax','float','marketing');
+CREATE TYPE journal_status AS ENUM ('pending','posted','reversed','void');
+CREATE TYPE thread_type AS ENUM ('booking','support','vendor','corporate','rfq');
+CREATE TYPE message_kind AS ENUM ('text','image','voice_note','pdf','document','location','system');
+CREATE TYPE call_type AS ENUM ('voice','video','masked_pstn');
+CREATE TYPE call_status AS ENUM ('ringing','active','ended','missed','failed','fallback_sms');
+CREATE TYPE loyalty_tier AS ENUM ('basic','silver','gold','platinum','executive');
+CREATE TYPE incident_severity AS ENUM ('low','medium','high','critical');
+CREATE TYPE incident_status AS ENUM ('open','triaging','responding','monitoring','resolved','closed','escalated_external');
+CREATE TYPE approval_status AS ENUM ('pending','approved','rejected','expired','auto_approved','cancelled');
+CREATE TYPE invoice_status AS ENUM ('draft','issued','partially_paid','paid','overdue','void');
+CREATE TYPE fraud_risk AS ENUM ('low','medium','high','block');
+CREATE TYPE promo_type AS ENUM ('percent','fixed_amount','free_delivery','cashback','referral');
+CREATE TYPE review_target AS ENUM ('driver','rider','vendor','customer','asset');
+CREATE TYPE notification_channel AS ENUM ('push','sms','whatsapp','email','in_app','voice_call');
+CREATE TYPE personnel_status AS ENUM ('pending_verification','active','deployed','off_duty','suspended');
+CREATE TYPE quote_status AS ENUM ('draft','sent','accepted','rejected','expired','withdrawn');
+CREATE TYPE rfq_status AS ENUM ('open','quoting','awarded','expired','cancelled');
+CREATE TYPE gds_provider AS ENUM ('amadeus','sabre');
+CREATE TYPE flight_booking_status AS ENUM ('held','paid','ticketed','cancelled','refunded','failed');
+CREATE TYPE trip_role AS ENUM ('driver','rider','both');
+CREATE TYPE wa_direction AS ENUM ('inbound','outbound');
+CREATE TYPE wa_message_type AS ENUM ('text','location','audio','image','document','button','interactive','template','system');
+CREATE TYPE wa_conv_status AS ENUM ('active','awaiting_customer','with_agent','closed','expired');
+CREATE TYPE wa_escalation_reason AS ENUM ('low_confidence','negative_sentiment','explicit_request','refund','safety','fraud');
+CREATE TYPE wa_escalation_status AS ENUM ('pending','with_agent','resolved_ai','resolved_agent','abandoned');
+CREATE TYPE wa_broadcast_status AS ENUM ('draft','pending_approval','scheduled','sending','sent','failed');
+CREATE TYPE wa_template_status AS ENUM ('draft','pending_meta','approved','rejected','paused');
+CREATE TYPE wa_link_status AS ENUM ('created','opened','paid','expired','used_failed');
+
+-- ============================================================================
+-- SCHEMA: geo — countries, cities, coverage, places
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS geo;
+
+CREATE TABLE geo.countries (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code CHAR(2) UNIQUE NOT NULL,                 -- ISO-3166-1 alpha-2
+  name TEXT NOT NULL,
+  dial_code VARCHAR(8) NOT NULL,
+  currency CHAR(3) NOT NULL,                    -- ISO-4217
+  timezone TEXT NOT NULL DEFAULT 'Africa/Lagos',
+  languages TEXT[] NOT NULL DEFAULT '{en}',
+  tax_model JSONB NOT NULL DEFAULT '{}',        -- VAT/WHT rules per country
+  psp_config JSONB NOT NULL DEFAULT '{}',       -- enabled PSPs + priorities
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  phase INT NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE geo.states (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  country_id UUID NOT NULL REFERENCES geo.countries(id),
+  code TEXT UNIQUE NOT NULL,                    -- 'NG-LAG' — FAMS state-level selector
+  name TEXT NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_states_country ON geo.states(country_id);
+
+-- Seed Nigeria + the 36 states & FCT (state codes are the FAMS state selectors)
+INSERT INTO geo.countries (code, name, dial_code, currency, timezone, languages, phase, is_active) VALUES
+  ('NG','Nigeria','+234','NGN','Africa/Lagos','{en,ha,yo,ig,pcm}',1,TRUE),
+  ('GH','Ghana','+233','GHS','Africa/Accra','{en}',2,FALSE),
+  ('KE','Kenya','+254','KES','Africa/Nairobi','{en,sw}',2,FALSE),
+  ('ZA','South Africa','+27','ZAR','Africa/Johannesburg','{en}',2,FALSE),
+  ('AE','United Arab Emirates','+971','AED','Asia/Dubai','{en,ar}',3,FALSE),
+  ('GB','United Kingdom','+44','GBP','Europe/London','{en}',3,FALSE),
+  ('US','United States','+1','USD','America/New_York','{en}',3,FALSE)
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO geo.states (country_id, code, name)
+SELECT c.id, s.code, s.name
+FROM geo.countries c, (VALUES
+  ('NG-AB','Abia'),('NG-AD','Adamawa'),('NG-AK','Akwa Ibom'),('NG-AN','Anambra'),('NG-BA','Bauchi'),
+  ('NG-BY','Bayelsa'),('NG-BE','Benue'),('NG-BOR','Borno'),('NG-CR','Cross River'),('NG-DE','Delta'),
+  ('NG-EB','Ebonyi'),('NG-ED','Edo'),('NG-EK','Ekiti'),('NG-EN','Enugu'),('NG-FCT','Federal Capital Territory'),
+  ('NG-GO','Gombe'),('NG-IM','Imo'),('NG-JI','Jigawa'),('NG-KAD','Kaduna'),('NG-KE','Kebbi'),
+  ('NG-KAN','Kano'),('NG-KAT','Katsina'),('NG-KWA','Kwara'),('NG-LAG','Lagos'),('NG-NAS','Nasarawa'),
+  ('NG-NIG','Niger'),('NG-OG','Ogun'),('NG-OND','Ondo'),('NG-OS','Osun'),('NG-OYO','Oyo'),
+  ('NG-PLA','Plateau'),('NG-RIV','Rivers'),('NG-SOK','Sokoto'),('NG-TAR','Taraba'),('NG-YOB','Yobe'),('NG-ZAM','Zamfara'),
+  ('KE-NAI','Nairobi'),('GH-GA','Greater Accra')
+) AS s(code, name)
+WHERE (c.code = 'NG' AND s.code LIKE 'NG-%') OR (c.code = 'KE' AND s.code = 'KE-NAI') OR (c.code = 'GH' AND s.code = 'GH-GA')
+ON CONFLICT (code) DO NOTHING;
+
+
+CREATE TABLE geo.cities (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  country_id UUID NOT NULL REFERENCES geo.countries(id),
+  code TEXT UNIQUE NOT NULL,                    -- e.g. 'NG-LAG'
+  name TEXT NOT NULL,
+  state TEXT,
+  timezone TEXT NOT NULL DEFAULT 'Africa/Lagos',
+  center GEOMETRY(Point, 4326) NOT NULL,
+  coverage GEOMETRY(Polygon, 4326),             -- default service polygon
+  surge_config JSONB NOT NULL DEFAULT '{}',
+  is_active BOOLEAN NOT NULL DEFAULT FALSE,     -- activated at launch
+  launch_date DATE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_cities_country ON geo.cities(country_id);
+CREATE INDEX idx_cities_center ON geo.cities USING GIST(center);
+-- Launch cities (phase-1 service cities; WKT points — PostGIS in prod)
+INSERT INTO geo.cities (country_id, code, name, state, center, is_active, launch_date)
+SELECT c.id, v.code, v.name, v.state, v.center, TRUE, DATE '2026-01-01'
+FROM geo.countries c, (VALUES
+  ('NG-LAG','Lagos','Lagos','POINT(3.3792 6.5244)'),
+  ('NG-ABJ','Abuja','Federal Capital Territory','POINT(7.4911 9.0579)'),
+  ('NG-PHC','Port Harcourt','Rivers','POINT(7.0134 4.8156)'),
+  ('NG-BNI','Benin City','Edo','POINT(5.6196 6.3350)'),
+  ('NG-ASB','Asaba','Delta','POINT(6.7425 6.2021)'),
+  ('NG-ENU','Enugu','Enugu','POINT(7.5104 6.4433)'),
+  ('NG-AWK','Awka','Anambra','POINT(7.0733 6.2076)'),
+  ('NG-ONI','Onitsha','Anambra','POINT(6.7865 6.1395)'),
+  ('NG-KAN','Kano','Kano','POINT(8.5219 12.0022)'),
+  ('NG-IBD','Ibadan','Oyo','POINT(3.9057 7.3777)')
+) AS v(code, name, state, center)
+WHERE c.code = 'NG'
+ON CONFLICT (code) DO NOTHING;
+
+
+CREATE TABLE geo.coverage_zones (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  city_id UUID NOT NULL REFERENCES geo.cities(id),
+  service_vertical service_vertical NOT NULL,
+  category_id UUID,                             -- FK platform.service_categories (added below)
+  name TEXT NOT NULL,
+  polygon GEOMETRY(Polygon, 4326) NOT NULL,
+  priority INT NOT NULL DEFAULT 0,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_coverage_poly ON geo.coverage_zones USING GIST(polygon);
+
+CREATE TABLE geo.places (                       -- saved/landmark places
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_user_id UUID,                           -- NULL = global landmark
+  label TEXT NOT NULL,
+  place_type TEXT NOT NULL DEFAULT 'other',     -- home, work, airport, hotel, landmark
+  address TEXT,
+  location GEOMETRY(Point, 4326) NOT NULL,
+  google_place_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_places_owner ON geo.places(owner_user_id);
+CREATE INDEX idx_places_loc ON geo.places USING GIST(location);
+
+-- ============================================================================
+-- SCHEMA: identity — users, sessions, devices, OTP, KYC, consent, audit
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS identity;
+
+CREATE TABLE identity.users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,               -- usr_xxxxx
+  phone VARCHAR(20) UNIQUE,
+  phone_verified BOOLEAN NOT NULL DEFAULT FALSE,
+  email TEXT UNIQUE,
+  email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+  password_hash TEXT,                           -- argon2id; NULL for OTP-only login
+  full_name TEXT,
+  avatar_url TEXT,
+  primary_type user_type NOT NULL DEFAULT 'customer',
+  country_code CHAR(2) NOT NULL REFERENCES geo.countries(code),
+  city_id UUID REFERENCES geo.cities(id),
+  locale TEXT NOT NULL DEFAULT 'en-NG',
+  timezone TEXT NOT NULL DEFAULT 'Africa/Lagos',
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  kyc_level kyc_level NOT NULL DEFAULT 'L1_PHONE',
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  banned_reason TEXT,
+  loyalty_tier loyalty_tier NOT NULL DEFAULT 'basic',
+  referral_code TEXT UNIQUE,
+  referred_by_user_id UUID REFERENCES identity.users(id),
+  risk_score NUMERIC(5,2) NOT NULL DEFAULT 0,
+  last_login_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deleted_at TIMESTAMPTZ,
+  CONSTRAINT users_phone_or_email CHECK (phone IS NOT NULL OR email IS NOT NULL)
+);
+CREATE INDEX idx_users_type ON identity.users(primary_type);
+CREATE INDEX idx_users_city ON identity.users(city_id);
+
+CREATE TABLE identity.user_roles (
+  user_id UUID NOT NULL REFERENCES identity.users(id) ON DELETE CASCADE,
+  role user_type NOT NULL,
+  granted_by UUID REFERENCES identity.users(id),
+  granted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, role)
+);
+
+CREATE TABLE identity.sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES identity.users(id) ON DELETE CASCADE,
+  refresh_token_hash TEXT NOT NULL,
+  device_id UUID,
+  ip INET,
+  user_agent TEXT,
+  expires_at TIMESTAMPTZ NOT NULL,
+  revoked_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_sessions_user ON identity.sessions(user_id);
+
+CREATE TABLE identity.devices (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES identity.users(id) ON DELETE CASCADE,
+  fingerprint TEXT NOT NULL,                    -- device hash
+  platform TEXT NOT NULL,                       -- android | ios | web
+  model TEXT,
+  app_version TEXT,
+  push_token TEXT,
+  trusted BOOLEAN NOT NULL DEFAULT FALSE,
+  last_seen_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (user_id, fingerprint)
+);
+
+CREATE TABLE identity.otp_codes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  destination TEXT NOT NULL,                    -- phone or email
+  channel notification_channel NOT NULL DEFAULT 'sms',
+  code_hash TEXT NOT NULL,
+  purpose TEXT NOT NULL,                        -- login, kyc, payout, mfa, vendor_invite
+  attempts INT NOT NULL DEFAULT 0,
+  max_attempts INT NOT NULL DEFAULT 5,
+  expires_at TIMESTAMPTZ NOT NULL,
+  consumed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_otp_destination ON identity.otp_codes(destination, purpose) WHERE consumed_at IS NULL;
+
+CREATE TABLE identity.kyc_verifications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES identity.users(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,                           -- identity_nin | identity_bvn | address | face | bank_penny_drop | cac | tin | license | insurance
+  level kyc_level NOT NULL,
+  provider TEXT,                                -- verification API partner
+  provider_ref TEXT,
+  status verification_status NOT NULL DEFAULT 'pending',
+  submitted_data JSONB NOT NULL DEFAULT '{}',
+  provider_result JSONB NOT NULL DEFAULT '{}',
+  document_url TEXT,                            -- S3 key
+  reviewed_by UUID REFERENCES identity.users(id),
+  review_note TEXT,
+  verified_at TIMESTAMPTZ,
+  expires_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_kyc_user ON identity.kyc_verifications(user_id, kind);
+CREATE INDEX idx_kyc_status ON identity.kyc_verifications(status) WHERE status IN ('pending','in_review');
+
+CREATE TABLE identity.consents (                -- NDPR/GDPR consent ledger
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES identity.users(id) ON DELETE CASCADE,
+  purpose TEXT NOT NULL,                        -- terms, privacy, marketing, location, biometric
+  granted BOOLEAN NOT NULL,
+  policy_version TEXT NOT NULL,
+  ip INET,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_consents_user ON identity.consents(user_id, purpose);
+
+CREATE TABLE identity.biometric_verifications ( -- face/liveness checks
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES identity.users(id) ON DELETE CASCADE,
+  purpose TEXT NOT NULL,                        -- daily_activation | booking | kyc
+  selfie_url TEXT,
+  match_score NUMERIC(5,4),
+  passed BOOLEAN NOT NULL,
+  provider TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_biometrics_user ON identity.biometric_verifications(user_id, created_at DESC);
+
+-- Tamper-evident audit log (hash chain per row)
+CREATE TABLE identity.audit_logs (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  actor_user_id UUID,
+  actor_role user_type,
+  action TEXT NOT NULL,                         -- e.g. escrow.release, admin.vendor.approve
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  before_state JSONB,
+  after_state JSONB,
+  ip INET,
+  user_agent TEXT,
+  trace_id TEXT,
+  prev_hash TEXT,
+  row_hash TEXT NOT NULL
+);
+CREATE INDEX idx_audit_entity ON identity.audit_logs(entity_type, entity_id, occurred_at DESC);
+CREATE INDEX idx_audit_actor ON identity.audit_logs(actor_user_id, occurred_at DESC);
+CREATE INDEX idx_audit_action ON identity.audit_logs(action, occurred_at DESC);
+
+-- ============================================================================
+-- SCHEMA: platform — service catalog, CMS, flags, reviews, notifications
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS platform;
+
+CREATE TABLE platform.service_categories (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  parent_id UUID REFERENCES platform.service_categories(id),
+  vertical service_vertical NOT NULL,
+  code TEXT UNIQUE NOT NULL,                    -- ride.economy, logistics.same_day, security.escort...
+  name TEXT NOT NULL,
+  description TEXT,
+  icon TEXT,
+  booking_mode TEXT NOT NULL DEFAULT 'instant', -- instant | scheduled | quote_based | search
+  base_fare BIGINT,                             -- minor units, default currency of country config
+  price_model JSONB NOT NULL DEFAULT '{}',      -- per_km, per_min, surge caps, wait rules
+  cancellation_policy JSONB NOT NULL DEFAULT '{}',
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  sort_order INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE platform.feature_flags (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  key TEXT UNIQUE NOT NULL,                     -- e.g. vertical.aviation.enabled
+  description TEXT,
+  enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  scope JSONB NOT NULL DEFAULT '{}',            -- {"countries":["NG"],"cities":[],"percent":10}
+  updated_by UUID,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE platform.cms_content (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  key TEXT UNIQUE NOT NULL,                     -- home.hero.en, faq.security.pidgin
+  locale TEXT NOT NULL DEFAULT 'en',
+  content_type TEXT NOT NULL DEFAULT 'text',    -- text | markdown | image_url | json
+  content TEXT NOT NULL,
+  published BOOLEAN NOT NULL DEFAULT FALSE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE platform.notification_templates (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT UNIQUE NOT NULL,                    -- booking.confirmed.customer
+  channel notification_channel NOT NULL,
+  locale TEXT NOT NULL DEFAULT 'en',
+  template TEXT NOT NULL,                       -- body with {{vars}}
+  variables TEXT[] NOT NULL DEFAULT '{}',
+  is_critical BOOLEAN NOT NULL DEFAULT FALSE    -- critical => SMS fallback
+);
+
+CREATE TABLE platform.notifications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES identity.users(id) ON DELETE CASCADE,
+  template_code TEXT,
+  channel notification_channel NOT NULL,
+  title TEXT,
+  body TEXT NOT NULL,
+  data JSONB NOT NULL DEFAULT '{}',
+  read_at TIMESTAMPTZ,
+  sent_at TIMESTAMPTZ,
+  status TEXT NOT NULL DEFAULT 'queued',        -- queued|sent|delivered|failed
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_notif_user ON platform.notifications(user_id, created_at DESC);
+
+CREATE TABLE platform.reviews (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id UUID,                              -- FK booking.bookings (added below)
+  author_user_id UUID NOT NULL REFERENCES identity.users(id),
+  target_type review_target NOT NULL,
+  target_id UUID NOT NULL,
+  rating SMALLINT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  tags TEXT[] NOT NULL DEFAULT '{}',
+  comment TEXT,
+  tip_amount BIGINT DEFAULT 0,
+  tip_currency CHAR(3),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (booking_id, author_user_id, target_type)
+);
+CREATE INDEX idx_reviews_target ON platform.reviews(target_type, target_id);
+
+CREATE TABLE platform.fraud_cases (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  case_ref TEXT UNIQUE NOT NULL,
+  subject_type TEXT NOT NULL,                   -- user | vendor | booking | payment | device
+  subject_id TEXT NOT NULL,
+  risk fraud_risk NOT NULL,
+  signals JSONB NOT NULL DEFAULT '{}',          -- rule hits + model score + reasons
+  model_score NUMERIC(5,4),
+  status TEXT NOT NULL DEFAULT 'open',          -- open|reviewing|cleared|actioned|escalated
+  assigned_to UUID REFERENCES identity.users(id),
+  outcome TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fraud_status ON platform.fraud_cases(status, created_at DESC);
+
+-- ============================================================================
+-- SCHEMA: vendor — vendors, verification, staff, subscriptions, assets
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS vendor;
+
+CREATE TABLE vendor.vendors (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,               -- vnd_xxxx
+  owner_user_id UUID NOT NULL REFERENCES identity.users(id),
+  vendor_type vendor_type NOT NULL,
+  legal_name TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  description TEXT,
+  logo_url TEXT,
+  cac_number TEXT,                              -- Corporate Affairs Commission
+  tin TEXT,                                     -- Tax ID
+  vat_registered BOOLEAN NOT NULL DEFAULT FALSE,
+  country_code CHAR(2) NOT NULL REFERENCES geo.countries(code),
+  city_id UUID NOT NULL REFERENCES geo.cities(id),
+  address TEXT,
+  contact_phone VARCHAR(20),
+  contact_email TEXT,
+  website TEXT,
+  years_operating SMALLINT,
+  staff_count INT,
+  bank_code TEXT,                               -- Nigerian bank code
+  bank_account_number TEXT,                     -- encrypted at rest via pgcrypto/KMS envelope
+  bank_account_name TEXT,
+  status vendor_status NOT NULL DEFAULT 'draft',
+  verification_status verification_status NOT NULL DEFAULT 'unverified',
+  rating_avg NUMERIC(3,2) NOT NULL DEFAULT 0,
+  rating_count INT NOT NULL DEFAULT 0,
+  acceptance_rate NUMERIC(5,4),
+  completion_rate NUMERIC(5,4),
+  commission_override NUMERIC(5,4),             -- negotiated override of category take rate
+  is_featured BOOLEAN NOT NULL DEFAULT FALSE,
+  metadata JSONB NOT NULL DEFAULT '{}',
+  activated_at TIMESTAMPTZ,
+  deactivated_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deleted_at TIMESTAMPTZ
+);
+CREATE INDEX idx_vendors_type_city ON vendor.vendors(vendor_type, city_id, status);
+CREATE INDEX idx_vendors_owner ON vendor.vendors(owner_user_id);
+
+CREATE TABLE vendor.vendor_verifications (      -- 5-layer verification, per layer per vendor
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id UUID NOT NULL REFERENCES vendor.vendors(id) ON DELETE CASCADE,
+  layer TEXT NOT NULL,                          -- identity | business | license | insurance | compliance
+  document_type TEXT NOT NULL,                  -- cac_cert, state_permit, ncaa_cert, insurance_policy, personnel_background...
+  document_url TEXT NOT NULL,                   -- S3 key
+  license_number TEXT,
+  issued_at DATE,
+  expires_at DATE,
+  issuer TEXT,
+  status verification_status NOT NULL DEFAULT 'pending',
+  verified_value JSONB NOT NULL DEFAULT '{}',   -- e.g. insurance cover amount
+  reviewed_by UUID REFERENCES identity.users(id),
+  review_note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reviewed_at TIMESTAMPTZ,
+  UNIQUE (vendor_id, layer, document_type)
+);
+CREATE INDEX idx_vendorverif_status ON vendor.vendor_verifications(status) WHERE status IN ('pending','in_review');
+CREATE INDEX idx_vendorverif_expiry ON vendor.vendor_verifications(expires_at) WHERE expires_at IS NOT NULL;
+
+CREATE TABLE vendor.vendor_staff (              -- drivers/riders/agents/personnel linked to vendors
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id UUID NOT NULL REFERENCES vendor.vendors(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES identity.users(id),
+  role TEXT NOT NULL,                           -- driver | rider | operations | manager | agent | security_personnel
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  commission_split NUMERIC(5,4),                -- vendor<->driver split when vendor supplies demand
+  invited_at TIMESTAMPTZ,
+  joined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (vendor_id, user_id, role)
+);
+CREATE INDEX idx_vendorstaff_user ON vendor.vendor_staff(user_id);
+
+CREATE TABLE platform.subscription_plans (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tier subscription_plan_tier UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  monthly_price BIGINT NOT NULL,                -- NGN minor units
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  max_listings INT,                             -- NULL = unlimited
+  monthly_booking_cap INT,
+  commission_discount_pts NUMERIC(4,2) NOT NULL DEFAULT 0,
+  payout_sla TEXT NOT NULL DEFAULT 'T+1',
+  features JSONB NOT NULL DEFAULT '{}',
+  is_active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE vendor.vendor_subscriptions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id UUID NOT NULL REFERENCES vendor.vendors(id) ON DELETE CASCADE,
+  plan_id UUID NOT NULL REFERENCES platform.subscription_plans(id),
+  status TEXT NOT NULL DEFAULT 'active',        -- active|past_due|cancelled|expired
+  period_start DATE NOT NULL,
+  period_end DATE NOT NULL,
+  price_paid BIGINT NOT NULL DEFAULT 0,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  payment_intent_id UUID,                       -- FK money.payment_intents
+  auto_renew BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_vsub_vendor ON vendor.vendor_subscriptions(vendor_id, status);
+
+CREATE TABLE vendor.assets (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,               -- ast_xxx
+  vendor_id UUID NOT NULL REFERENCES vendor.vendors(id) ON DELETE CASCADE,
+  asset_type asset_type NOT NULL,
+  make TEXT, model TEXT, year SMALLINT,
+  color TEXT, plate_number TEXT,                -- vehicle reg / aircraft tail / boat reg
+  capacity_pax SMALLINT,
+  capacity_kg NUMERIC(8,2),
+  amenities TEXT[] NOT NULL DEFAULT '{}',       -- wifi, leather, wheelchair, child_seat, medical_kit
+  base_location GEOMETRY(Point, 4326),
+  photos TEXT[] NOT NULL DEFAULT '{}',          -- S3 keys (ordered)
+  video_url TEXT,
+  status asset_status NOT NULL DEFAULT 'pending_docs',
+  odometer_km INT,
+  insurance_policy_ref TEXT,
+  insurance_expiry DATE,
+  last_maintenance_at DATE,
+  next_maintenance_due DATE,
+  metadata JSONB NOT NULL DEFAULT '{}',         -- e.g. {jet_range_nm, cabin_class, medical_equipment}
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deleted_at TIMESTAMPTZ
+);
+CREATE INDEX idx_assets_vendor ON vendor.assets(vendor_id, asset_type, status);
+CREATE INDEX idx_assets_loc ON vendor.assets USING GIST(base_location);
+
+CREATE TABLE vendor.asset_documents (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  asset_id UUID NOT NULL REFERENCES vendor.assets(id) ON DELETE CASCADE,
+  doc_type TEXT NOT NULL,                       -- road_worthiness, license, insurance, noise_cert, airworthiness...
+  document_url TEXT NOT NULL,
+  number TEXT,
+  issued_at DATE,
+  expires_at DATE,
+  verified BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_assetdocs_expiry ON vendor.asset_documents(expires_at) WHERE expires_at IS NOT NULL;
+
+CREATE TABLE vendor.asset_maintenance (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  asset_id UUID NOT NULL REFERENCES vendor.assets(id) ON DELETE CASCADE,
+  performed_at DATE NOT NULL,
+  kind TEXT NOT NULL,                           -- routine | repair | inspection | upgrade
+  description TEXT NOT NULL,
+  cost BIGINT, currency CHAR(3),
+  odometer_km INT,
+  vendor_service TEXT,
+  documents TEXT[] NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE vendor.asset_availability (        -- calendar blocks
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  asset_id UUID NOT NULL REFERENCES vendor.assets(id) ON DELETE CASCADE,
+  starts_at TIMESTAMPTZ NOT NULL,
+  ends_at TIMESTAMPTZ NOT NULL,
+  state TEXT NOT NULL DEFAULT 'blocked',        -- blocked | available | maintenance | booked
+  reason TEXT,
+  booking_id UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT avail_window CHECK (ends_at > starts_at)
+);
+CREATE INDEX idx_avail_asset_time ON vendor.asset_availability(asset_id, starts_at);
+
+CREATE TABLE vendor.pricing_rules (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id UUID REFERENCES vendor.vendors(id) ON DELETE CASCADE,   -- NULL = platform default
+  category_id UUID REFERENCES platform.service_categories(id),
+  asset_type asset_type,
+  city_id UUID REFERENCES geo.cities(id),
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  base_fare BIGINT NOT NULL,
+  per_km BIGINT NOT NULL DEFAULT 0,
+  per_minute BIGINT NOT NULL DEFAULT 0,
+  per_kg BIGINT NOT NULL DEFAULT 0,
+  per_stop BIGINT NOT NULL DEFAULT 0,
+  wait_per_minute BIGINT NOT NULL DEFAULT 0,
+  minimum_fare BIGINT NOT NULL,
+  surge_cap NUMERIC(4,2) NOT NULL DEFAULT 2.0,
+  surge_participation BOOLEAN NOT NULL DEFAULT TRUE,
+  schedule JSONB NOT NULL DEFAULT '{}',         -- night multipliers, peak windows
+  priority INT NOT NULL DEFAULT 0,              -- most specific rule wins
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ============================================================================
+-- SCHEMA: booking — bookings, stops, events, RFQs, quotes, offers
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS booking;
+
+CREATE TABLE booking.bookings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,               -- bkg_xxx
+  type booking_type NOT NULL,
+  category_id UUID NOT NULL REFERENCES platform.service_categories(id),
+  vertical service_vertical NOT NULL,
+  status booking_status NOT NULL DEFAULT 'draft',
+  customer_id UUID NOT NULL REFERENCES identity.users(id),
+  vendor_id UUID REFERENCES vendor.vendors(id),
+  assigned_staff_id UUID REFERENCES identity.users(id),  -- driver/rider
+  asset_id UUID REFERENCES vendor.assets(id),
+  company_id UUID,                              -- FK corporate.companies (added below)
+  country_code CHAR(2) NOT NULL REFERENCES geo.countries(code),
+  city_id UUID NOT NULL REFERENCES geo.cities(id),
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  pickup_label TEXT,
+  pickup_location GEOMETRY(Point, 4326) NOT NULL,
+  dropoff_label TEXT,
+  dropoff_location GEOMETRY(Point, 4326),
+  route_polyline GEOMETRY(LineString, 4326),
+  distance_m INT,
+  duration_s INT,
+  scheduled_at TIMESTAMPTZ,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  cancelled_at TIMESTAMPTZ,
+  cancel_reason TEXT,
+  cancelled_by TEXT,                            -- customer|vendor|driver|system|admin
+  price_quote JSONB,                            -- frozen quote at confirmation (fare breakdown)
+  final_price BIGINT,                           -- minor units
+  commission_amount BIGINT,
+  tax_amount BIGINT,
+  vendor_net_amount BIGINT,
+  payment_method payment_method_type NOT NULL DEFAULT 'wallet',
+  payment_status payment_status NOT NULL DEFAULT 'initiated',
+  promo_code TEXT,
+  discount_amount BIGINT NOT NULL DEFAULT 0,
+  corporate_cost_center TEXT,
+  recurring_rule JSONB,                         -- parent template for recurring children
+  parent_booking_id UUID REFERENCES booking.bookings(id),
+  metadata JSONB NOT NULL DEFAULT '{}',         -- flight PNR link, parcel details, security scope...
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_bookings_customer ON booking.bookings(customer_id, created_at DESC);
+CREATE INDEX idx_bookings_vendor ON booking.bookings(vendor_id, status);
+CREATE INDEX idx_bookings_staff ON booking.bookings(assigned_staff_id, status);
+CREATE INDEX idx_bookings_ops ON booking.bookings(city_id, status, created_at DESC);
+CREATE INDEX idx_bookings_active ON booking.bookings(status) WHERE status IN ('requested','matched','confirmed','en_route','in_progress','disputed');
+CREATE INDEX idx_bookings_sched ON booking.bookings(scheduled_at) WHERE scheduled_at IS NOT NULL;
+
+CREATE TABLE booking.booking_stops (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id UUID NOT NULL REFERENCES booking.bookings(id) ON DELETE CASCADE,
+  seq SMALLINT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'stop',            -- pickup | stop | dropoff
+  label TEXT,
+  location GEOMETRY(Point, 4326) NOT NULL,
+  contact_name TEXT, contact_phone VARCHAR(20),
+  otp_hash TEXT,                                -- release OTP for deliveries
+  eta_s INT, actual_arrival TIMESTAMPTZ,
+  pod_photo_url TEXT, pod_signature_url TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',       -- pending|arrived|completed|failed
+  notes TEXT
+);
+CREATE UNIQUE INDEX idx_stops_seq ON booking.booking_stops(booking_id, seq);
+
+CREATE TABLE booking.booking_events (           -- append-only state history
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  booking_id UUID NOT NULL REFERENCES booking.bookings(id) ON DELETE CASCADE,
+  status booking_status NOT NULL,
+  actor_type TEXT, actor_id TEXT,
+  reason TEXT,
+  data JSONB NOT NULL DEFAULT '{}',
+  occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_bkevents_real ON booking.booking_events(booking_id, occurred_at);
+
+CREATE TABLE booking.rfqs (                     -- quote-based requests (aviation, security, events, luxury)
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,
+  booking_id UUID REFERENCES booking.bookings(id),
+  customer_id UUID NOT NULL REFERENCES identity.users(id),
+  company_id UUID,                              -- FK corporate.companies
+  vertical service_vertical NOT NULL,
+  category_id UUID REFERENCES platform.service_categories(id),
+  city_id UUID REFERENCES geo.cities(id),
+  title TEXT NOT NULL,
+  scope JSONB NOT NULL,                         -- pax, route, dates, personnel, risk, assets
+  budget_min BIGINT, budget_max BIGINT, currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  desired_start TIMESTAMPTZ,
+  desired_end TIMESTAMPTZ,
+  status rfq_status NOT NULL DEFAULT 'open',
+  invited_vendor_ids UUID[] NOT NULL DEFAULT '{}',
+  closes_at TIMESTAMPTZ,
+  awarded_quote_id UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_rfq_status ON booking.rfqs(status, created_at DESC);
+
+CREATE TABLE booking.quotes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  rfq_id UUID NOT NULL REFERENCES booking.rfqs(id) ON DELETE CASCADE,
+  vendor_id UUID NOT NULL REFERENCES vendor.vendors(id),
+  amount BIGINT NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  milestone_plan JSONB NOT NULL DEFAULT '[]',   -- [{label,due_offset_hours,pct}]
+  terms TEXT,
+  valid_until TIMESTAMPTZ NOT NULL,
+  status quote_status NOT NULL DEFAULT 'sent',
+  rejected_reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_quotes_rfq ON booking.quotes(rfq_id, status);
+
+CREATE TABLE booking.offers (                   -- instant dispatch offers to vendors/drivers
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id UUID NOT NULL REFERENCES booking.bookings(id) ON DELETE CASCADE,
+  vendor_id UUID REFERENCES vendor.vendors(id),
+  staff_user_id UUID REFERENCES identity.users(id),
+  asset_id UUID REFERENCES vendor.assets(id),
+  rank SMALLINT NOT NULL DEFAULT 1,
+  match_score NUMERIC(6,4),
+  fare BIGINT NOT NULL, currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  status TEXT NOT NULL DEFAULT 'sent',          -- sent|accepted|rejected|timeout|withdrawn
+  expires_at TIMESTAMPTZ NOT NULL,
+  responded_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_offers_booking ON booking.offers(booking_id, status);
+CREATE INDEX idx_offers_staff ON booking.offers(staff_user_id, status) WHERE status = 'sent';
+
+-- ============================================================================
+-- SCHEMA: money — wallets, ledger, payments, escrow, payouts, disputes, FX
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS money;
+
+CREATE TABLE money.fx_rates (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  base CHAR(3) NOT NULL,
+  quote CHAR(3) NOT NULL,
+  rate NUMERIC(16,8) NOT NULL,
+  source TEXT NOT NULL,
+  effective_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fx_lookup ON money.fx_rates(base, quote, effective_at DESC);
+
+CREATE TABLE money.wallets (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,               -- wal_xxx
+  owner_user_id UUID REFERENCES identity.users(id),
+  vendor_id UUID REFERENCES vendor.vendors(id),
+  company_id UUID,                              -- FK corporate.companies
+  wallet_type wallet_type NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  country_code CHAR(2) NOT NULL REFERENCES geo.countries(code),
+  balance_available BIGINT NOT NULL DEFAULT 0,  -- cached; truth = ledger
+  balance_pending BIGINT NOT NULL DEFAULT 0,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT wallet_owner CHECK (owner_user_id IS NOT NULL OR vendor_id IS NOT NULL OR company_id IS NOT NULL OR wallet_type IN ('platform_revenue','escrow','tax','float','marketing'))
+);
+CREATE UNIQUE INDEX idx_wallet_owner_unique ON money.wallets (COALESCE(owner_user_id,'00000000-0000-0000-0000-000000000000'), COALESCE(vendor_id,'00000000-0000-0000-0000-000000000000'), COALESCE(company_id,'00000000-0000-0000-0000-000000000000'), wallet_type, currency);
+CREATE INDEX idx_wallets_user ON money.wallets(owner_user_id);
+
+CREATE TABLE money.ledger_accounts (            -- chart of accounts (platform + per-wallet control accts)
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT UNIQUE NOT NULL,                    -- 1001.CUSTOMER.usr_xxx style
+  name TEXT NOT NULL,
+  account_type TEXT NOT NULL,                   -- asset|liability|revenue|expense|equity
+  owner_user_id UUID, vendor_id UUID, company_id UUID,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  is_active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE SEQUENCE IF NOT EXISTS money.journal_seq;
+
+CREATE TABLE money.journal_entries (            -- append-only; reversal = new entry
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  entry_no BIGINT UNIQUE NOT NULL DEFAULT nextval('money.journal_seq'),
+  booking_id UUID REFERENCES booking.bookings(id),
+  source_type TEXT NOT NULL,                    -- payment|escrow|payout|refund|commission|subscription|reward|adjustment|chargeback
+  source_id UUID,
+  narration TEXT NOT NULL,
+  status journal_status NOT NULL DEFAULT 'posted',
+  posted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  reversal_of UUID REFERENCES money.journal_entries(id),
+  metadata JSONB NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE money.journal_lines (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  journal_entry_id UUID NOT NULL REFERENCES money.journal_entries(id) ON DELETE CASCADE,
+  ledger_account_id UUID NOT NULL REFERENCES money.ledger_accounts(id),
+  wallet_id UUID REFERENCES money.wallets(id),
+  direction CHAR(1) NOT NULL CHECK (direction IN ('D','C')),
+  amount BIGINT NOT NULL CHECK (amount >= 0),
+  currency CHAR(3) NOT NULL DEFAULT 'NGN'
+);
+CREATE INDEX idx_jlines_entry ON money.journal_lines(journal_entry_id);
+CREATE INDEX idx_jlines_wallet ON money.journal_lines(wallet_id, id DESC);
+
+-- Balanced-entry guard trigger
+CREATE OR REPLACE FUNCTION money.assert_balanced_entry() RETURNS trigger AS $$
+DECLARE d BIGINT; c BIGINT; dc CHAR(3); cc CHAR(3);
+BEGIN
+  SELECT COALESCE(SUM(amount),0), MIN(currency) INTO d, dc FROM money.journal_lines WHERE journal_entry_id = NEW.journal_entry_id AND direction='D';
+  SELECT COALESCE(SUM(amount),0), MIN(currency) INTO c, cc FROM money.journal_lines WHERE journal_entry_id = NEW.journal_entry_id AND direction='C';
+  IF d IS DISTINCT FROM c OR dc IS DISTINCT FROM cc THEN
+    RAISE EXCEPTION 'Unbalanced journal entry %: D=% (%), C=% (%)', NEW.journal_entry_id, d, dc, c, cc;
+  END IF;
+  RETURN NULL;
+END $$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER trg_journal_balanced
+AFTER INSERT ON money.journal_lines
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION money.assert_balanced_entry();
+
+-- Wallet balance materialization
+CREATE OR REPLACE FUNCTION money.apply_wallet_delta() RETURNS trigger AS $$
+BEGIN
+  UPDATE money.wallets w SET
+    balance_available = balance_available + CASE WHEN t.direction='D' THEN t.amount ELSE -t.amount END,
+    updated_at = now()
+  FROM (SELECT * FROM (VALUES (NEW.wallet_id, NEW.direction, NEW.amount)) AS x(wid, dir, amt)) t(wid, dir, amt)
+  WHERE w.id = NEW.wallet_id AND NEW.wallet_id IS NOT NULL;
+  RETURN NULL;
+END $$ LANGUAGE plpgsql;
+
+CREATE TABLE money.payment_methods (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_user_id UUID NOT NULL REFERENCES identity.users(id) ON DELETE CASCADE,
+  method payment_method_type NOT NULL,
+  psp psp_provider,
+  psp_token TEXT,                               -- PSP tokenized ref only; never PAN
+  brand TEXT, last4 TEXT, bank_code TEXT, bank_account_masked TEXT,
+  is_default BOOLEAN NOT NULL DEFAULT FALSE,
+  verified BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deleted_at TIMESTAMPTZ
+);
+
+CREATE TABLE money.payment_intents (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,
+  idempotency_key TEXT UNIQUE,
+  user_id UUID NOT NULL REFERENCES identity.users(id),
+  wallet_id UUID REFERENCES money.wallets(id),
+  booking_id UUID REFERENCES booking.bookings(id),
+  purpose TEXT NOT NULL,                        -- booking|wallet_funding|subscription|payout_funding
+  method payment_method_type NOT NULL,
+  psp psp_provider,
+  psp_ref TEXT,
+  amount BIGINT NOT NULL CHECK (amount >= 0),
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  fx_rate_id UUID REFERENCES money.fx_rates(id),
+  status payment_status NOT NULL DEFAULT 'initiated',
+  failure_reason TEXT,
+  authorized_at TIMESTAMPTZ, captured_at TIMESTAMPTZ,
+  reconciled_at TIMESTAMPTZ,
+  metadata JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_payint_user ON money.payment_intents(user_id, created_at DESC);
+CREATE INDEX idx_payint_booking ON money.payment_intents(booking_id);
+CREATE INDEX idx_payint_psp ON money.payment_intents(psp, psp_ref);
+CREATE INDEX idx_payint_unreconciled ON money.payment_intents(created_at) WHERE reconciled_at IS NULL AND status IN ('captured','refunded','partially_refunded');
+
+CREATE TABLE money.psp_webhooks (               -- raw events for replay & 3-way reconciliation
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  psp psp_provider NOT NULL,
+  event_type TEXT NOT NULL,
+  psp_event_id TEXT UNIQUE,
+  signature_valid BOOLEAN NOT NULL DEFAULT FALSE,
+  payload JSONB NOT NULL,
+  processed_at TIMESTAMPTZ,
+  processing_error TEXT,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE money.escrow_holds (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,
+  booking_id UUID NOT NULL REFERENCES booking.bookings(id),
+  quote_id UUID REFERENCES booking.quotes(id),
+  wallet_id UUID REFERENCES money.wallets(id),
+  total_amount BIGINT NOT NULL,
+  released_amount BIGINT NOT NULL DEFAULT 0,
+  refunded_amount BIGINT NOT NULL DEFAULT 0,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  state escrow_state NOT NULL DEFAULT 'authorized',
+  milestone_plan JSONB NOT NULL DEFAULT '[]',
+  dispute_id UUID,
+  hold_expires_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_escrow_booking ON money.escrow_holds(booking_id);
+CREATE INDEX idx_escrow_state ON money.escrow_holds(state);
+
+CREATE TABLE money.escrow_releases (            -- one row per tranche (full or milestone)
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  escrow_id UUID NOT NULL REFERENCES money.escrow_holds(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'completion',      -- completion|milestone|refund|partial_refund|reversal
+  amount BIGINT NOT NULL CHECK (amount > 0),
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  commission BIGINT NOT NULL DEFAULT 0,
+  tax BIGINT NOT NULL DEFAULT 0,
+  vendor_net BIGINT NOT NULL DEFAULT 0,
+  driver_share BIGINT,
+  approved_by UUID REFERENCES identity.users(id),
+  reason TEXT,
+  journal_entry_id UUID REFERENCES money.journal_entries(id),
+  released_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE money.payouts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,
+  beneficiary_type TEXT NOT NULL,               -- vendor|driver|rider|company|customer_refund
+  vendor_id UUID REFERENCES vendor.vendors(id),
+  user_id UUID REFERENCES identity.users(id),
+  batch_id UUID,
+  amount BIGINT NOT NULL CHECK (amount > 0),
+  fee BIGINT NOT NULL DEFAULT 0,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  destination TEXT NOT NULL,                    -- bank code+masked account
+  psp psp_provider, psp_transfer_ref TEXT,
+  status payout_status NOT NULL DEFAULT 'queued',
+  scheduled_for TIMESTAMPTZ,
+  processed_at TIMESTAMPTZ,
+  failure_reason TEXT,
+  journal_entry_id UUID REFERENCES money.journal_entries(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_payouts_beneficiary ON money.payouts(beneficiary_type, vendor_id, user_id, status);
+CREATE INDEX idx_payouts_queue ON money.payouts(status, scheduled_for);
+
+CREATE TABLE money.refunds (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  payment_intent_id UUID NOT NULL REFERENCES money.payment_intents(id),
+  booking_id UUID REFERENCES booking.bookings(id),
+  dispute_id UUID,
+  amount BIGINT NOT NULL CHECK (amount > 0),
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  reason_code TEXT NOT NULL,
+  initiator TEXT NOT NULL,                      -- customer|vendor|admin|system|chargeback
+  status refund_status NOT NULL DEFAULT 'requested',
+  psp_ref TEXT,
+  journal_entry_id UUID REFERENCES money.journal_entries(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE money.disputes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,
+  booking_id UUID NOT NULL REFERENCES booking.bookings(id),
+  escrow_id UUID REFERENCES money.escrow_holds(id),
+  opened_by UUID NOT NULL REFERENCES identity.users(id),
+  category TEXT NOT NULL,                       -- service_quality|no_show|overcharge|safety|damage|fraud|other
+  description TEXT NOT NULL,
+  status dispute_status NOT NULL DEFAULT 'open',
+  amount_claimed BIGINT NOT NULL,
+  amount_awarded BIGINT,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  assigned_agent UUID REFERENCES identity.users(id),
+  sla_respond_by TIMESTAMPTZ NOT NULL,
+  sla_resolve_by TIMESTAMPTZ NOT NULL,
+  resolution_note TEXT,
+  resolved_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_disputes_status ON money.disputes(status, sla_resolve_by);
+
+CREATE TABLE money.dispute_messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  dispute_id UUID NOT NULL REFERENCES money.disputes(id) ON DELETE CASCADE,
+  author_user_id UUID REFERENCES identity.users(id),
+  party TEXT NOT NULL,                          -- customer|vendor|agent|system
+  message TEXT NOT NULL,
+  attachments TEXT[] NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ============================================================================
+-- SCHEMA: travel — flight bookings, passengers, segments (Amadeus/Sabre)
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS travel;
+
+CREATE TABLE travel.flight_bookings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,
+  booking_id UUID NOT NULL REFERENCES booking.bookings(id),
+  gds gds_provider NOT NULL,
+  gds_pnr TEXT,
+  airline_pnr TEXT,
+  itinerary_type TEXT NOT NULL,                 -- one_way|return|multi_city
+  origin TEXT NOT NULL, destination TEXT NOT NULL,
+  depart_date DATE NOT NULL, return_date DATE,
+  cabin TEXT NOT NULL DEFAULT 'economy',
+  total_fare BIGINT NOT NULL,
+  taxes BIGINT NOT NULL DEFAULT 0,
+  service_fee BIGINT NOT NULL DEFAULT 0,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  status flight_booking_status NOT NULL DEFAULT 'held',
+  ticket_numbers TEXT[] NOT NULL DEFAULT '{}',
+  contact_email TEXT, contact_phone VARCHAR(20),
+  gds_raw JSONB,
+  hold_expires_at TIMESTAMPTZ,
+  ticketed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_flightbk_booking ON travel.flight_bookings(booking_id);
+CREATE INDEX idx_flightbk_pnr ON travel.flight_bookings(gds_pnr);
+
+CREATE TABLE travel.flight_segments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  flight_booking_id UUID NOT NULL REFERENCES travel.flight_bookings(id) ON DELETE CASCADE,
+  seq SMALLINT NOT NULL,
+  airline_code TEXT NOT NULL, flight_number TEXT NOT NULL,
+  dep_airport TEXT NOT NULL, arr_airport TEXT NOT NULL,
+  dep_at TIMESTAMPTZ NOT NULL, arr_at TIMESTAMPTZ NOT NULL,
+  aircraft TEXT, duration_min INT,
+  stops SMALLINT NOT NULL DEFAULT 0,
+  cabin TEXT, baggage TEXT,
+  seats TEXT[] NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE travel.flight_passengers (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  flight_booking_id UUID NOT NULL REFERENCES travel.flight_bookings(id) ON DELETE CASCADE,
+  full_name TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT 'adult',           -- adult|child|infant
+  gender TEXT,
+  date_of_birth DATE,
+  nationality CHAR(2),
+  passport_number TEXT, passport_expiry DATE,
+  ticket_number TEXT
+);
+
+-- ============================================================================
+-- SCHEMA: secops — security personnel, deployments, incidents
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS secops;
+
+CREATE TABLE secops.security_personnel (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id UUID NOT NULL REFERENCES vendor.vendors(id) ON DELETE CASCADE,
+  user_id UUID REFERENCES identity.users(id),
+  full_name TEXT NOT NULL,
+  role_grade TEXT NOT NULL,                     -- agent|team_lead|supervisor| consultant
+  license_number TEXT,
+  license_expiry DATE,
+  weapon_certified BOOLEAN NOT NULL DEFAULT FALSE,
+  first_aid_certified BOOLEAN NOT NULL DEFAULT FALSE,
+  background_check_ref TEXT,
+  background_check_expiry DATE,
+  status personnel_status NOT NULL DEFAULT 'pending_verification',
+  photo_url TEXT,
+  documents TEXT[] NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_personnel_vendor ON secops.security_personnel(vendor_id, status);
+CREATE INDEX idx_personnel_expiry ON secops.security_personnel(license_expiry, background_check_expiry);
+
+CREATE TABLE secops.deployments (               -- security engagement under a booking/RFQ
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id UUID NOT NULL REFERENCES booking.bookings(id),
+  vendor_id UUID NOT NULL REFERENCES vendor.vendors(id),
+  run_sheet JSONB NOT NULL DEFAULT '{}',        -- routes, vehicles, protocols, comms plan
+  personnel_ids UUID[] NOT NULL DEFAULT '{}',
+  starts_at TIMESTAMPTZ NOT NULL,
+  ends_at TIMESTAMPTZ NOT NULL,
+  status TEXT NOT NULL DEFAULT 'planned',       -- planned|active|completed|aborted
+  client_contact TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE secops.deployment_logs (           -- daily activity + milestone evidence
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  deployment_id UUID NOT NULL REFERENCES secops.deployments(id) ON DELETE CASCADE,
+  logged_by UUID REFERENCES identity.users(id),
+  log_date DATE NOT NULL,
+  summary TEXT NOT NULL,
+  incidents TEXT,
+  client_signature_url TEXT,
+  milestone_label TEXT,
+  milestone_approved_by UUID,
+  milestone_approved_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE secops.incident_reports (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id UUID REFERENCES booking.bookings(id),
+  deployment_id UUID REFERENCES secops.deployments(id),
+  reporter_user_id UUID REFERENCES identity.users(id),
+  severity incident_severity NOT NULL DEFAULT 'medium',
+  category TEXT NOT NULL,                       -- sos|accident|crime|medical|deviation|other
+  status incident_status NOT NULL DEFAULT 'open',
+  description TEXT,
+  location GEOMETRY(Point, 4326),
+  occurred_at TIMESTAMPTZ NOT NULL,
+  timeline JSONB NOT NULL DEFAULT '[]',         -- auto-captured events trail
+  response_actions JSONB NOT NULL DEFAULT '[]',
+  resolved_at TIMESTAMPTZ,
+  follow_up TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_incidents_status ON secops.incident_reports(status, severity, occurred_at DESC);
+
+-- ============================================================================
+-- SCHEMA: telemetry — GPS positions (Timescale), geofence events
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS telemetry;
+
+CREATE TABLE telemetry.positions (
+  booking_id UUID NOT NULL,
+  user_id UUID NOT NULL,
+  ts TIMESTAMPTZ NOT NULL,
+  geom GEOMETRY(Point, 4326) NOT NULL,
+  speed_kmh NUMERIC(5,2),
+  heading SMALLINT,
+  accuracy_m SMALLINT,
+  source TEXT NOT NULL DEFAULT 'gps'            -- gps|network|osrm_snap
+);
+CREATE INDEX idx_positions_booking_time ON telemetry.positions(booking_id, ts DESC);
+CREATE INDEX idx_positions_geom ON telemetry.positions USING GIST(geom);
+-- SELECT create_hypertable('telemetry.positions','ts', chunk_time_interval => INTERVAL '1 day');
+-- SELECT add_compression_policy('telemetry.positions', INTERVAL '7 days');
+
+CREATE TABLE telemetry.geofence_events (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  zone_id UUID NOT NULL REFERENCES geo.coverage_zones(id),
+  subject_type TEXT NOT NULL,                  -- user|asset
+  subject_id UUID NOT NULL,
+  event TEXT NOT NULL,                          -- entered|exited|dwelled
+  dwell_seconds INT,
+  occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_geo_events_zone ON telemetry.geofence_events(zone_id, occurred_at DESC);
+
+-- ============================================================================
+-- SCHEMA: comms — threads, messages, calls
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS comms;
+
+CREATE TABLE comms.threads (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,
+  thread_type thread_type NOT NULL,
+  booking_id UUID REFERENCES booking.bookings(id),
+  rfq_id UUID REFERENCES booking.rfqs(id),
+  title TEXT,
+  created_by UUID REFERENCES identity.users(id),
+  last_message_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  archived_at TIMESTAMPTZ
+);
+CREATE INDEX idx_threads_booking ON comms.threads(booking_id);
+CREATE INDEX idx_threads_lastmsg ON comms.threads(last_message_at DESC);
+
+CREATE TABLE comms.thread_participants (
+  thread_id UUID NOT NULL REFERENCES comms.threads(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES identity.users(id),
+  role TEXT NOT NULL DEFAULT 'member',
+  last_read_message_id BIGINT,
+  joined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  muted BOOLEAN NOT NULL DEFAULT FALSE,
+  PRIMARY KEY (thread_id, user_id)
+);
+
+CREATE TABLE comms.messages (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  thread_id UUID NOT NULL REFERENCES comms.threads(id) ON DELETE CASCADE,
+  sender_user_id UUID REFERENCES identity.users(id),
+  kind message_kind NOT NULL DEFAULT 'text',
+  body TEXT,                                    -- encrypted payload or transcript
+  attachment_url TEXT,
+  attachment_meta JSONB NOT NULL DEFAULT '{}',
+  location GEOMETRY(Point, 4326),
+  reply_to_id BIGINT,
+  delivered_mask TEXT[] NOT NULL DEFAULT '{}',
+  read_mask TEXT[] NOT NULL DEFAULT '{}',
+  translation JSONB NOT NULL DEFAULT '{}',      -- {locale: text}
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deleted_at TIMESTAMPTZ
+);
+CREATE INDEX idx_messages_thread ON comms.messages(thread_id, id DESC);
+
+CREATE TABLE comms.calls (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  thread_id UUID REFERENCES comms.threads(id),
+  booking_id UUID REFERENCES booking.bookings(id),
+  caller_id UUID NOT NULL REFERENCES identity.users(id),
+  callee_id UUID NOT NULL REFERENCES identity.users(id),
+  call_type call_type NOT NULL,
+  status call_status NOT NULL DEFAULT 'ringing',
+  masked_number VARCHAR(20),
+  started_at TIMESTAMPTZ, ended_at TIMESTAMPTZ,
+  duration_s INT,
+  recording_url TEXT,                           -- consented recordings only
+  ai_summary TEXT,
+  quality JSONB NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_calls_parties ON comms.calls(caller_id, callee_id, created_at DESC);
+
+-- ============================================================================
+-- SCHEMA: corporate — companies, departments, employees, budgets, approvals, invoices
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS corporate;
+
+CREATE TABLE corporate.companies (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,
+  legal_name TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  cac_number TEXT,
+  tin TEXT,
+  industry TEXT,
+  country_code CHAR(2) NOT NULL REFERENCES geo.countries(code),
+  city_id UUID REFERENCES geo.cities(id),
+  address TEXT,
+  admin_user_id UUID NOT NULL REFERENCES identity.users(id),
+  account_manager_id UUID REFERENCES identity.users(id),
+  billing_email TEXT,
+  billing_address TEXT,
+  negotiated_commission NUMERIC(5,4),
+  platform_fee_monthly BIGINT,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  status TEXT NOT NULL DEFAULT 'pending_docs',  -- pending_docs|active|suspended
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  deleted_at TIMESTAMPTZ
+);
+
+CREATE TABLE corporate.departments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id UUID NOT NULL REFERENCES corporate.companies(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  parent_id UUID REFERENCES corporate.departments(id),
+  cost_center_code TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE corporate.company_employees (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id UUID NOT NULL REFERENCES corporate.companies(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES identity.users(id),
+  department_id UUID REFERENCES corporate.departments(id),
+  title TEXT,
+  role TEXT NOT NULL DEFAULT 'employee',        -- employee|approver|finance|admin
+  approval_limit BIGINT NOT NULL DEFAULT 0,     -- minor units; 0 = none
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  joined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (company_id, user_id)
+);
+
+CREATE TABLE corporate.budget_pools (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id UUID NOT NULL REFERENCES corporate.companies(id) ON DELETE CASCADE,
+  department_id UUID REFERENCES corporate.departments(id),
+  name TEXT NOT NULL,
+  service_vertical service_vertical,
+  period TEXT NOT NULL,                         -- 2026-09 monthly | Q3-2026 | FY2026
+  limit_amount BIGINT NOT NULL,
+  spent_amount BIGINT NOT NULL DEFAULT 0,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  alert_threshold_pct SMALLINT NOT NULL DEFAULT 80,
+  policy JSONB NOT NULL DEFAULT '{}',           -- class caps, allowlist vendors, curfew hours
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_budgets_company ON corporate.budget_pools(company_id, period);
+
+CREATE TABLE corporate.approval_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  company_id UUID NOT NULL REFERENCES corporate.companies(id),
+  booking_id UUID REFERENCES booking.bookings(id),
+  requested_by UUID NOT NULL REFERENCES identity.users(id),
+  approver_id UUID REFERENCES identity.users(id),
+  amount BIGINT NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  reason TEXT,
+  status approval_status NOT NULL DEFAULT 'pending',
+  policy_reason TEXT,                           -- which rule triggered
+  decided_at TIMESTAMPTZ,
+  expires_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_approvals_pending ON corporate.approval_requests(status, approver_id) WHERE status='pending';
+
+CREATE TABLE corporate.invoices (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,
+  company_id UUID NOT NULL REFERENCES corporate.companies(id),
+  period_start DATE NOT NULL,
+  period_end DATE NOT NULL,
+  subtotal BIGINT NOT NULL DEFAULT 0,
+  vat BIGINT NOT NULL DEFAULT 0,
+  wht BIGINT NOT NULL DEFAULT 0,
+  total BIGINT NOT NULL DEFAULT 0,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  status invoice_status NOT NULL DEFAULT 'draft',
+  due_date DATE,
+  pdf_url TEXT,
+  issued_at TIMESTAMPTZ,
+  paid_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE corporate.invoice_lines (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  invoice_id UUID NOT NULL REFERENCES corporate.invoices(id) ON DELETE CASCADE,
+  booking_id UUID REFERENCES booking.bookings(id),
+  department_id UUID REFERENCES corporate.departments(id),
+  employee_user_id UUID REFERENCES identity.users(id),
+  description TEXT NOT NULL,
+  service_vertical service_vertical,
+  amount BIGINT NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN'
+);
+CREATE INDEX idx_invlines_invoice ON corporate.invoice_lines(invoice_id);
+
+-- ============================================================================
+-- SCHEMA: growth — loyalty, promotions, referrals
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS growth;
+
+CREATE TABLE growth.loyalty_members (
+  user_id UUID PRIMARY KEY REFERENCES identity.users(id) ON DELETE CASCADE,
+  tier loyalty_tier NOT NULL DEFAULT 'basic',
+  points_balance BIGINT NOT NULL DEFAULT 0,
+  lifetime_points BIGINT NOT NULL DEFAULT 0,
+  rolling_90d_spend BIGINT NOT NULL DEFAULT 0,
+  cashback_rate NUMERIC(4,3) NOT NULL DEFAULT 0.005,
+  tier_updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE growth.loyalty_ledger (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES identity.users(id) ON DELETE CASCADE,
+  booking_id UUID REFERENCES booking.bookings(id),
+  kind TEXT NOT NULL,                           -- earn|redeem|cashback|expire|adjust
+  points BIGINT NOT NULL,
+  value BIGINT NOT NULL DEFAULT 0,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  expires_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_loyalty_ledger_user ON growth.loyalty_ledger(user_id, created_at DESC);
+
+CREATE TABLE growth.promotions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT UNIQUE,
+  name TEXT NOT NULL,
+  type promo_type NOT NULL,
+  value BIGINT NOT NULL,                        -- percent*100 or minor units
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  verticals service_vertical[] NOT NULL DEFAULT '{}',
+  cities UUID[] NOT NULL DEFAULT '{}',
+  max_redemptions INT,
+  max_redemptions_per_user INT NOT NULL DEFAULT 1,
+  min_spend BIGINT NOT NULL DEFAULT 0,
+  starts_at TIMESTAMPTZ NOT NULL,
+  ends_at TIMESTAMPTZ NOT NULL,
+  budget_cap BIGINT,
+  budget_spent BIGINT NOT NULL DEFAULT 0,
+  funded_by TEXT NOT NULL DEFAULT 'platform',   -- platform|vendor
+  vendor_id UUID REFERENCES vendor.vendors(id),
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_promo_active ON growth.promotions(is_active, ends_at);
+
+CREATE TABLE growth.promo_redemptions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  promotion_id UUID NOT NULL REFERENCES growth.promotions(id),
+  user_id UUID NOT NULL REFERENCES identity.users(id),
+  booking_id UUID REFERENCES booking.bookings(id),
+  discount_amount BIGINT NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (promotion_id, user_id, booking_id)
+);
+
+CREATE TABLE growth.referrals (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  referrer_id UUID NOT NULL REFERENCES identity.users(id),
+  referee_id UUID NOT NULL REFERENCES identity.users(id),
+  status TEXT NOT NULL DEFAULT 'pending',       -- pending|qualified|rewarded|rejected
+  reward_type TEXT NOT NULL DEFAULT 'wallet_credit',
+  reward_amount BIGINT NOT NULL DEFAULT 0,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  qualified_at TIMESTAMPTZ,
+  rewarded_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (referrer_id, referee_id)
+);
+
+-- ============================================================================
+-- SCHEMA: analytics — rollup marts (incremental, replica-friendly)
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS analytics;
+
+CREATE TABLE analytics.daily_city_metrics (
+  day DATE NOT NULL,
+  city_id UUID NOT NULL,
+  vertical service_vertical NOT NULL,
+  bookings INT NOT NULL DEFAULT 0,
+  completed INT NOT NULL DEFAULT 0,
+  cancelled INT NOT NULL DEFAULT 0,
+  gmv BIGINT NOT NULL DEFAULT 0,
+  commission BIGINT NOT NULL DEFAULT 0,
+  net_revenue BIGINT NOT NULL DEFAULT 0,
+  refunds BIGINT NOT NULL DEFAULT 0,
+  new_customers INT NOT NULL DEFAULT 0,
+  new_vendors INT NOT NULL DEFAULT 0,
+  active_drivers INT NOT NULL DEFAULT 0,
+  avg_match_seconds NUMERIC(10,2),
+  PRIMARY KEY (day, city_id, vertical)
+);
+
+CREATE TABLE analytics.vendor_metrics_daily (
+  day DATE NOT NULL,
+  vendor_id UUID NOT NULL,
+  offers_received INT DEFAULT 0,
+  offers_accepted INT DEFAULT 0,
+  bookings_completed INT DEFAULT 0,
+  bookings_cancelled INT DEFAULT 0,
+  gross_earnings BIGINT DEFAULT 0,
+  commission_paid BIGINT DEFAULT 0,
+  rating_avg NUMERIC(3,2),
+  PRIMARY KEY (day, vendor_id)
+);
+
+CREATE TABLE analytics.driver_metrics_daily (
+  day DATE NOT NULL,
+  user_id UUID NOT NULL,
+  trips INT DEFAULT 0,
+  online_minutes INT DEFAULT 0,
+  earnings BIGINT DEFAULT 0,
+  acceptance_rate NUMERIC(5,4),
+  PRIMARY KEY (day, user_id)
+);
+
+-- ============================================================================
+-- SCHEMA: whatsapp — Smart AI Customer Service Platform (docs/26)
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS whatsapp;
+
+CREATE TABLE whatsapp.conversations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  wa_phone VARCHAR(20) NOT NULL,                 -- customer MSISDN
+  user_id UUID REFERENCES identity.users(id),    -- linked platform identity (OTP match)
+  status wa_conv_status NOT NULL DEFAULT 'active',
+  language TEXT NOT NULL DEFAULT 'en',           -- en | ha | yo | ig | pcm
+  current_intent TEXT,
+  current_node TEXT,                             -- dialog node (collect_slots, confirm, payment…)
+  draft_slots JSONB NOT NULL DEFAULT '{}',       -- live slot-filling state
+  context JSONB NOT NULL DEFAULT '{}',           -- rolling context memory (last booking, prefs)
+  csat SMALLINT CHECK (csat BETWEEN 1 AND 5),
+  last_message_at TIMESTAMPTZ,
+  session_started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX idx_waconv_phone ON whatsapp.conversations(wa_phone);        -- one live thread per customer
+CREATE INDEX idx_waconv_status ON whatsapp.conversations(status, last_message_at DESC);
+
+CREATE TABLE whatsapp.messages (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  conversation_id UUID NOT NULL REFERENCES whatsapp.conversations(id) ON DELETE CASCADE,
+  direction wa_direction NOT NULL,
+  type wa_message_type NOT NULL,
+  text TEXT,
+  media_url TEXT,                                -- S3 key for voice/images/docs
+  wa_message_id TEXT UNIQUE,                     -- Cloud API message id (dedupe)
+  intent TEXT,
+  confidence NUMERIC(4,3),
+  entities JSONB NOT NULL DEFAULT '{}',
+  language TEXT,
+  latency_ms INT,                                -- AI response time
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_wamsg_conv ON whatsapp.messages(conversation_id, id DESC);
+CREATE INDEX idx_wamsg_intent ON whatsapp.messages(intent, created_at DESC);
+
+CREATE TABLE whatsapp.escalations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id UUID NOT NULL REFERENCES whatsapp.conversations(id) ON DELETE CASCADE,
+  reason wa_escalation_reason NOT NULL,
+  ai_confidence NUMERIC(4,3),
+  assigned_agent_id UUID REFERENCES identity.users(id),
+  status wa_escalation_status NOT NULL DEFAULT 'pending',
+  first_response_seconds INT,
+  resolution_note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_at TIMESTAMPTZ
+);
+CREATE INDEX idx_waesc_pending ON whatsapp.escalations(status, created_at) WHERE status IN ('pending','with_agent');
+
+CREATE TABLE whatsapp.payment_links (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,                -- wpl_xxx
+  conversation_id UUID REFERENCES whatsapp.conversations(id),
+  booking_id UUID REFERENCES booking.bookings(id),
+  amount BIGINT NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  psp psp_provider NOT NULL DEFAULT 'paystack',
+  signature TEXT NOT NULL,                       -- HMAC (verified on redemption)
+  status wa_link_status NOT NULL DEFAULT 'created',
+  expires_at TIMESTAMPTZ NOT NULL,
+  paid_at TIMESTAMPTZ,
+  payment_intent_id UUID,                        -- FK money.payment_intents
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_walink_booking ON whatsapp.payment_links(booking_id);
+CREATE INDEX idx_walink_open ON whatsapp.payment_links(expires_at) WHERE status IN ('created','opened');
+
+CREATE TABLE whatsapp.templates (                -- Meta-approved WAMM templates
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  category TEXT NOT NULL CHECK (category IN ('UTILITY','MARKETING','AUTHENTICATION')),
+  locale TEXT NOT NULL DEFAULT 'en',
+  header TEXT, body TEXT NOT NULL, footer TEXT,
+  buttons JSONB NOT NULL DEFAULT '[]',
+  variables TEXT[] NOT NULL DEFAULT '{}',
+  meta_status wa_template_status NOT NULL DEFAULT 'draft',
+  meta_rejected_reason TEXT,
+  created_by UUID REFERENCES identity.users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (name, locale)
+);
+
+CREATE TABLE whatsapp.broadcasts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  template_id UUID REFERENCES whatsapp.templates(id),
+  name TEXT NOT NULL,
+  audience JSONB NOT NULL DEFAULT '{}',          -- {cities, verticals, tiers, opt_in_only:true}
+  status wa_broadcast_status NOT NULL DEFAULT 'draft',
+  scheduled_at TIMESTAMPTZ,
+  sent_count INT NOT NULL DEFAULT 0,
+  failed_count INT NOT NULL DEFAULT 0,
+  cost BIGINT NOT NULL DEFAULT 0, currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  approved_by UUID REFERENCES identity.users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE whatsapp.broadcast_recipients (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  broadcast_id UUID NOT NULL REFERENCES whatsapp.broadcasts(id) ON DELETE CASCADE,
+  wa_phone VARCHAR(20) NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',         -- queued|sent|delivered|read|failed
+  error TEXT,
+  sent_at TIMESTAMPTZ
+);
+CREATE INDEX idx_wabrec_broadcast ON whatsapp.broadcast_recipients(broadcast_id, status);
+
+-- Daily rollups for the WhatsApp analytics dashboard
+CREATE TABLE whatsapp.analytics_daily (
+  day DATE NOT NULL,
+  country_code CHAR(2) NOT NULL DEFAULT 'NG',
+  conversations INT NOT NULL DEFAULT 0,
+  active_conversations INT NOT NULL DEFAULT 0,
+  messages_in INT NOT NULL DEFAULT 0,
+  messages_out INT NOT NULL DEFAULT 0,
+  bookings_created INT NOT NULL DEFAULT 0,
+  bookings_completed INT NOT NULL DEFAULT 0,
+  conversion_rate NUMERIC(5,4),
+  ai_resolved INT NOT NULL DEFAULT 0,
+  escalations INT NOT NULL DEFAULT 0,
+  avg_ai_response_ms INT,
+  avg_first_response_s INT,                      -- human agent first-response
+  csat_avg NUMERIC(3,2),
+  gmv BIGINT NOT NULL DEFAULT 0,
+  revenue BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, country_code)
+);
+
+-- Marketing/consent: WhatsApp outreach requires explicit opt-in (NDPR + Meta policy)
+ALTER TABLE identity.consents
+  ADD CONSTRAINT consent_purpose_wa CHECK (purpose <> 'whatsapp_marketing' OR granted = true) NOT VALID;
+
+-- ============================================================================
+-- HELPFUL VIEWS
+-- ============================================================================
+CREATE OR REPLACE VIEW booking.v_active_bookings AS
+  SELECT * FROM booking.bookings WHERE status IN ('requested','matched','confirmed','en_route','in_progress');
+
+CREATE OR REPLACE VIEW money.v_wallet_truth AS
+SELECT w.id wallet_id, w.balance_available cached_balance,
+       COALESCE(SUM(CASE WHEN l.direction='D' THEN l.amount ELSE -l.amount END),0) ledger_balance
+FROM money.wallets w
+LEFT JOIN money.journal_lines l ON l.wallet_id = w.id
+GROUP BY w.id, w.balance_available;
+
+CREATE OR REPLACE VIEW vendor.v_expiring_docs AS
+SELECT 'vendor' AS scope, vendor_id, layer AS item, expires_at
+FROM vendor.vendor_verifications WHERE expires_at < now() + INTERVAL '30 days'
+UNION ALL
+SELECT 'asset', asset_id, doc_type, expires_at
+FROM vendor.asset_documents WHERE expires_at < now() + INTERVAL '30 days'
+UNION ALL
+SELECT 'personnel', id, 'license', license_expiry
+FROM secops.security_personnel WHERE license_expiry < now() + INTERVAL '30 days';
+
+CREATE OR REPLACE VIEW whatsapp.v_agent_inbox AS
+SELECT e.id, e.conversation_id, c.wa_phone, c.language, e.reason, e.status, e.ai_confidence,
+       c.last_message_at, u.full_name AS agent
+FROM whatsapp.escalations e
+JOIN whatsapp.conversations c ON c.id = e.conversation_id
+LEFT JOIN identity.users u ON u.id = e.assigned_agent_id
+WHERE e.status IN ('pending','with_agent')
+ORDER BY e.created_at;
+
+CREATE OR REPLACE VIEW whatsapp.v_conversation_performance AS
+SELECT c.id, c.wa_phone, c.status, c.language,
+       COUNT(m.id) FILTER (WHERE m.direction = 'inbound') AS msgs_in,
+       COUNT(m.id) FILTER (WHERE m.direction = 'outbound') AS msgs_out,
+       MAX(m.confidence) AS top_confidence,
+       MAX(m.created_at) AS last_at,
+       (SELECT COUNT(*) FROM booking.bookings b WHERE b.customer_id = c.user_id AND b.created_at > c.session_started_at) AS bookings_this_session
+FROM whatsapp.conversations c
+LEFT JOIN whatsapp.messages m ON m.conversation_id = c.id
+GROUP BY c.id;
+
+-- ============================================================================
+-- FAMS — FEATURE ACTIVATION MANAGEMENT SYSTEM (docs/28, migration 004)
+-- Centralized activation control without software updates. Precedence:
+-- asset(70) > vendor(60) > category(50) > city(40) > state(30) > country(20)
+-- > global(10), +15 for user-group-scoped rules; kill switch overrides all.
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS fams;
+
+CREATE TABLE fams.services (                     -- every module/vertical/category/feature, built day one
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT UNIQUE NOT NULL,                     -- module.transportation, ride.vip, feature.wallet
+  kind TEXT NOT NULL CHECK (kind IN ('module','vertical','category','feature')),
+  parent_code TEXT REFERENCES fams.services(code),
+  name TEXT NOT NULL,
+  icon TEXT,
+  default_value TEXT NOT NULL DEFAULT 'on' CHECK (default_value IN ('on','off','hidden','maintenance','beta')),
+  phase INT NOT NULL DEFAULT 1,                  -- launch phase 1..5
+  sort_order INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE fams.states (                       -- sub-country control layer
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT UNIQUE NOT NULL,                     -- NG-LAG, NG-ED, KE-NAI
+  country_code CHAR(2) NOT NULL REFERENCES geo.countries(code),
+  name TEXT NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fams_states_country ON fams.states(country_code);
+
+CREATE TABLE fams.feature_flags (                -- engine-native rules: scope, window, geofence, rollout
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  level TEXT NOT NULL DEFAULT 'global' CHECK (level IN ('global','country','state','city','category','vendor','asset')),
+  selector TEXT,                                 -- NG, NG-ED, NG-BEN, ride.vip, vnd_.., ast_..
+  value TEXT NOT NULL CHECK (value IN ('on','off','hidden','maintenance','beta')),
+  user_groups TEXT[] NOT NULL DEFAULT '{}',      -- customers|vendors|corporate|beta|vip ({} = everyone)
+  rollout_pct NUMERIC(5,2),                      -- deterministic % of user ids
+  starts_at TIMESTAMPTZ,                         -- activate 01 Jan 2027
+  ends_at TIMESTAMPTZ,                           -- deactivate 31 Jan 2027
+  geofence JSONB,                                -- {"lat":6.5774,"lng":3.3212,"radiusM":15000}
+  note TEXT,
+  updated_by UUID REFERENCES identity.users(id),
+  version BIGINT NOT NULL DEFAULT 1,             -- monotonic recency tie-break
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fams_flags_service ON fams.feature_flags(service_code);
+CREATE INDEX idx_fams_flags_level_sel ON fams.feature_flags(level, selector);
+
+CREATE TABLE fams.service_availability (         -- country/state/city/road-zone gates
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  level TEXT NOT NULL CHECK (level IN ('global','country','state','city','road_zone')),
+  selector TEXT NOT NULL,                        -- NG | NG-ED | NG-BEN
+  value TEXT NOT NULL CHECK (value IN ('on','off','hidden','maintenance','beta')),
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMPTZ,
+  note TEXT,
+  updated_by UUID,
+  version BIGINT NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (service_code, level, selector)
+);
+CREATE INDEX idx_fams_avail_lookup ON fams.service_availability(service_code, selector);
+
+CREATE TABLE fams.feature_rollouts (             -- phased launch + user-group activation
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  phase INT NOT NULL CHECK (phase BETWEEN 1 AND 5),
+  user_groups TEXT[] NOT NULL DEFAULT '{customers}',
+  rollout_pct NUMERIC(5,2) NOT NULL DEFAULT 100 CHECK (rollout_pct BETWEEN 0 AND 100),
+  countries TEXT[] NOT NULL DEFAULT '{}',
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMPTZ,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE fams.vendor_activation (            -- Active/Suspended/Pending Review/Maintenance/Disabled
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id UUID NOT NULL REFERENCES vendor.vendors(id),
+  vendor_code TEXT UNIQUE NOT NULL,              -- vnd_a, vnd_b (engine key)
+  state TEXT NOT NULL DEFAULT 'pending_review'
+    CHECK (state IN ('active','suspended','pending_review','maintenance','disabled')),
+  reason TEXT,
+  countries TEXT[] NOT NULL DEFAULT '{}',
+  scheduled_resume_at TIMESTAMPTZ,
+  updated_by UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fams_vendor_state ON fams.vendor_activation(state);
+
+CREATE TABLE fams.asset_activation (             -- car/motorcycle/dispatch_bike/helicopter/private_jet/charter_aircraft/boat/yacht
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  asset_code TEXT UNIQUE NOT NULL,               -- ast_jet_b, or class 'helicopter'
+  asset_type TEXT NOT NULL CHECK (asset_type IN ('car','vehicle','motorcycle','dispatch_bike','helicopter','private_jet','jet','charter_aircraft','boat','yacht')),
+  asset_id UUID,
+  service_code TEXT REFERENCES fams.services(code),
+  value TEXT NOT NULL DEFAULT 'on' CHECK (value IN ('on','off','hidden','maintenance','beta')),
+  countries TEXT[] NOT NULL DEFAULT '{}',
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMPTZ,
+  note TEXT,
+  updated_by UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE fams.scheduled_activations (        -- time-based activation (cron applies due rows)
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  action TEXT NOT NULL DEFAULT 'set_value' CHECK (action IN ('set_value','emergency_stop','emergency_clear')),
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  level TEXT NOT NULL DEFAULT 'global' CHECK (level IN ('global','country','state','city','road_zone','category','vendor','fleet','vehicle','asset')),
+  selector TEXT,
+  value TEXT,
+  run_at TIMESTAMPTZ NOT NULL,                   -- e.g. activate 2027-01-01, deactivate 2027-01-31
+  executed_at TIMESTAMPTZ,
+  note TEXT,
+  created_by UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fams_sched_due ON fams.scheduled_activations(executed_at, run_at);
+
+CREATE TABLE fams.emergency_stops (              -- kill switch, no deploy, overrides every rule
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  target_key TEXT UNIQUE NOT NULL,               -- 'vertical:aviation', 'module:wallet'
+  reason TEXT NOT NULL,
+  stopped_by UUID NOT NULL,
+  stopped_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  cleared_at TIMESTAMPTZ
+);
+
+CREATE TABLE fams.audit_log (                    -- every activation change, trail-logged
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  actor_id UUID NOT NULL,
+  actor_role TEXT NOT NULL,
+  action TEXT NOT NULL,                          -- rule.upsert, rule.delete, emergency.on...
+  target TEXT NOT NULL,
+  before JSONB,
+  after JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fams_audit_target ON fams.audit_log(target, created_at DESC);
+
+CREATE TABLE fams.country_services (             -- spec table: country-level activation
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  country_code CHAR(2) NOT NULL REFERENCES geo.countries(code),
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  value TEXT NOT NULL CHECK (value IN ('on','off','hidden','maintenance','beta')),
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMPTZ,
+  note TEXT,
+  updated_by UUID,
+  version BIGINT NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (country_code, service_code)
+);
+CREATE INDEX idx_fams_country_svc ON fams.country_services(country_code, service_code);
+
+CREATE TABLE fams.state_services (               -- spec table: state/province activation
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  state_code TEXT NOT NULL REFERENCES fams.states(code),
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  value TEXT NOT NULL CHECK (value IN ('on','off','hidden','maintenance','beta')),
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMPTZ,
+  note TEXT,
+  updated_by UUID,
+  version BIGINT NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (state_code, service_code)
+);
+CREATE INDEX idx_fams_state_svc ON fams.state_services(state_code, service_code);
+
+CREATE TABLE fams.city_services (                -- spec table: city-level activation (+ optional fence)
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  city_code TEXT NOT NULL REFERENCES geo.cities(code),
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  value TEXT NOT NULL CHECK (value IN ('on','off','hidden','maintenance','beta')),
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMPTZ,
+  geofence JSONB,                                -- {"lat":6.5774,"lng":3.3212,"radiusM":15000}
+  note TEXT,
+  updated_by UUID,
+  version BIGINT NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (city_code, service_code)
+);
+CREATE INDEX idx_fams_city_svc ON fams.city_services(city_code, service_code);
+
+CREATE TABLE fams.activation_logs (              -- spec table: full activation change history
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  actor_id UUID NOT NULL,
+  actor_role TEXT NOT NULL,                      -- super_admin | admin | scheduler | system
+  action TEXT NOT NULL,                          -- activate | deactivate | hide | maintenance | schedule | emergency_stop | rollout
+  scope TEXT NOT NULL,                           -- global | country | state | city | category | vendor | asset | user_group
+  selector TEXT,                                 -- NG | NG-ED | NG-BNI | ride.vip | vnd_a | ast_jet_b | beta
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  before_value TEXT,
+  after_value TEXT,
+  reason TEXT,
+  request_ip INET,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fams_act_logs_service ON fams.activation_logs(service_code, created_at DESC);
+CREATE INDEX idx_fams_act_logs_actor ON fams.activation_logs(actor_id, created_at DESC);
+
+-- Activation analytics (10th dashboard module): coverage per service
+CREATE OR REPLACE VIEW fams.v_activation_analytics AS
+SELECT s.code AS service_code, s.name AS service_name, s.kind,
+       COALESCE(cs.active_countries, 0) AS countries_on,
+       COALESCE(ss.active_states, 0) AS states_on,
+       COALESCE(cis.active_cities, 0) AS cities_on,
+       EXISTS (SELECT 1 FROM fams.emergency_stops es
+               WHERE es.target_key IN (s.code, 'module:' || split_part(s.code, '.', 1))
+                 AND es.cleared_at IS NULL) AS emergency_stopped
+FROM fams.services s
+LEFT JOIN (SELECT service_code, COUNT(*) AS active_countries FROM fams.country_services WHERE value IN ('on','beta') GROUP BY service_code) cs ON cs.service_code = s.code
+LEFT JOIN (SELECT service_code, COUNT(*) AS active_states FROM fams.state_services WHERE value IN ('on','beta') GROUP BY service_code) ss ON ss.service_code = s.code
+LEFT JOIN (SELECT service_code, COUNT(*) AS active_cities FROM fams.city_services WHERE value IN ('on','beta') GROUP BY service_code) cis ON cis.service_code = s.code
+ORDER BY s.kind, s.sort_order;
+
+-- ============================================================================
+-- SHIELD — AUTONOMOUS CYBERSECURITY & THREAT INTELLIGENCE SWARM
+-- (docs/29, migration 007): agent fleet, real-time threat detection, fraud
+-- swarm, autonomous response with approvals, self-healing runs, zero-trust
+-- decisions and compliance reporting.
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS shield;
+
+CREATE TABLE shield.security_agents (           -- fleet registry, elastically scaled
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent_key TEXT UNIQUE NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('network','application','infrastructure','identity','data','threat_intel','fraud','data_intelligence')),
+  monitors TEXT[] NOT NULL DEFAULT '{}',
+  capabilities TEXT[] NOT NULL DEFAULT '{}',
+  region TEXT NOT NULL DEFAULT 'af-south-1',
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_heartbeat TIMESTAMPTZ,
+  checks BIGINT NOT NULL DEFAULT 0,
+  findings BIGINT NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','paused','retired'))
+);
+CREATE INDEX idx_shield_agents_kind ON shield.security_agents(kind, status);
+
+CREATE TABLE shield.security_events (           -- real-time stream (daily partitions in prod)
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  category TEXT NOT NULL CHECK (category IN ('auth','api','wallet','escrow','db','infra','network','vendor','customer','whatsapp','devsecops')),
+  source TEXT NOT NULL,
+  principal TEXT,
+  ip INET,
+  device_id TEXT,
+  action TEXT NOT NULL,
+  outcome TEXT CHECK (outcome IN ('success','failure','denied')),
+  bytes_out BIGINT,
+  risk_hints TEXT[] NOT NULL DEFAULT '{}',
+  meta JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_shield_events_principal ON shield.security_events(principal, ts DESC);
+CREATE INDEX idx_shield_events_category ON shield.security_events(category, ts DESC);
+
+CREATE TABLE shield.threats (                   -- detected, scored, correlated
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  engine_key TEXT UNIQUE NOT NULL,
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  type TEXT NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('critical','high','medium','low')),
+  score INT NOT NULL CHECK (score BETWEEN 0 AND 100),
+  principal TEXT, ip INET, category TEXT,
+  sources TEXT[] NOT NULL DEFAULT '{}',
+  signals TEXT[] NOT NULL DEFAULT '{}',
+  campaign_key TEXT,
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','containing','contained','resolved','false_positive'))
+);
+CREATE INDEX idx_shield_threats_status ON shield.threats(status, severity DESC);
+CREATE INDEX idx_shield_threats_campaign ON shield.threats(campaign_key);
+
+CREATE TABLE shield.incidents (                 -- correlated campaigns with timelines
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  campaign_key TEXT,
+  title TEXT NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('critical','high','medium','low')),
+  status TEXT NOT NULL DEFAULT 'investigating' CHECK (status IN ('investigating','contained','eradicated','recovered','closed')),
+  timeline JSONB NOT NULL DEFAULT '[]',
+  detected_by TEXT NOT NULL DEFAULT 'shield-autonomous',
+  owner TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  closed_at TIMESTAMPTZ
+);
+
+CREATE TABLE shield.response_actions (          -- autonomous response ledger
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  engine_key TEXT UNIQUE NOT NULL,
+  threat_id UUID REFERENCES shield.threats(id),
+  action TEXT NOT NULL CHECK (action IN ('block_request','rate_limit','suspend_account','disable_credential','quarantine_workload','revoke_tokens','isolate_service','emergency_workflow','alert_admins','escalate_incident')),
+  mode TEXT NOT NULL CHECK (mode IN ('auto','approval','notify')),
+  status TEXT NOT NULL CHECK (status IN ('executed','pending_approval','rejected','expired')),
+  target TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  executed_by TEXT NOT NULL DEFAULT 'shield-autonomous',
+  approved_by TEXT,
+  ts TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_shield_actions_status ON shield.response_actions(status, ts DESC);
+
+CREATE TABLE shield.action_approvals (          -- human decision queue for high-impact actions
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  response_action_id UUID NOT NULL REFERENCES shield.response_actions(id),
+  action TEXT NOT NULL,
+  target TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  risk_score INT NOT NULL,
+  requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  decided_at TIMESTAMPTZ,
+  decided_by TEXT,
+  decision TEXT CHECK (decision IN ('approved','rejected'))
+);
+
+CREATE TABLE shield.response_policies (         -- configurable thresholds & modes (guardrails)
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  action TEXT NOT NULL,
+  min_severity TEXT NOT NULL CHECK (min_severity IN ('critical','high','medium','low')),
+  min_score INT NOT NULL CHECK (min_score BETWEEN 0 AND 100),
+  mode TEXT NOT NULL CHECK (mode IN ('auto','approval','notify')),
+  cooldown_sec INT NOT NULL DEFAULT 0,
+  updated_by TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (action)
+);
+
+CREATE TABLE shield.fraud_alerts (              -- fraud & trust swarm output
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  engine_key TEXT UNIQUE NOT NULL,
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  rule TEXT NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('critical','high','medium','low')),
+  score INT NOT NULL CHECK (score BETWEEN 0 AND 100),
+  principal TEXT NOT NULL,
+  evidence TEXT[] NOT NULL DEFAULT '{}',
+  recommended_actions TEXT[] NOT NULL DEFAULT '{}',
+  trust_score_after INT
+);
+CREATE INDEX idx_shield_fraud_principal ON shield.fraud_alerts(principal, ts DESC);
+
+CREATE TABLE shield.attack_patterns (           -- MITRE ATT&CK-mapped pattern library
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  pattern_key TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  mitre TEXT,
+  tactics TEXT[] NOT NULL DEFAULT '{}',
+  matches_threat_types TEXT[] NOT NULL DEFAULT '{}',
+  playbook_id UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE shield.vulnerabilities (           -- SAST/dependency/container/IaC findings
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  vuln_key TEXT UNIQUE NOT NULL,
+  cve TEXT,
+  component TEXT NOT NULL,
+  title TEXT NOT NULL,
+  cvss NUMERIC(3,1) NOT NULL CHECK (cvss BETWEEN 0 AND 10),
+  exploit_likelihood NUMERIC(3,2) NOT NULL DEFAULT 0.5 CHECK (exploit_likelihood BETWEEN 0 AND 1),
+  status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','patching','mitigated','accepted')),
+  sla_hours INT NOT NULL DEFAULT 168,
+  source TEXT NOT NULL DEFAULT 'ci-scan',
+  detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_at TIMESTAMPTZ
+);
+CREATE INDEX idx_shield_vulns_status ON shield.vulnerabilities(status, cvss DESC);
+
+CREATE TABLE shield.playbooks (                 -- security response playbooks
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  playbook_key TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  triggers TEXT[] NOT NULL DEFAULT '{}',
+  steps TEXT[] NOT NULL DEFAULT '{}',
+  auto_actions TEXT[] NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE shield.behavioral_baselines (      -- deviation-scoring models
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  principal TEXT UNIQUE NOT NULL,
+  active_hours INT[] NOT NULL DEFAULT '{6,23}',
+  cities TEXT[] NOT NULL DEFAULT '{}',
+  devices TEXT[] NOT NULL DEFAULT '{}',
+  avg_tx_minor BIGINT NOT NULL DEFAULT 0,
+  samples INT NOT NULL DEFAULT 0,
+  model_version TEXT NOT NULL DEFAULT 'v1',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE shield.recovery_runs (             -- self-healing execution log
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  engine_key TEXT UNIQUE NOT NULL,
+  service TEXT NOT NULL,
+  trigger TEXT NOT NULL,
+  steps TEXT[] NOT NULL DEFAULT '{}',
+  steps_done TEXT[] NOT NULL DEFAULT '{}',
+  mode TEXT NOT NULL CHECK (mode IN ('auto','approval')),
+  outcome TEXT NOT NULL CHECK (outcome IN ('recovered','degraded_recovered','failed','awaiting_approval')),
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at TIMESTAMPTZ,
+  approved_by TEXT
+);
+
+CREATE TABLE shield.device_trust (              -- zero-trust device identity
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  device_id TEXT UNIQUE NOT NULL,
+  trust_score INT NOT NULL CHECK (trust_score BETWEEN 0 AND 100),
+  first_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+  incidents INT NOT NULL DEFAULT 0,
+  distinct_principals INT NOT NULL DEFAULT 1,
+  mfa_seen BOOLEAN NOT NULL DEFAULT FALSE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE shield.access_decisions (          -- continuous verification trail
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  principal TEXT NOT NULL,
+  role TEXT NOT NULL,
+  capability TEXT NOT NULL,
+  decision TEXT NOT NULL CHECK (decision IN ('allow','step_up_mfa','allow_read_only','deny')),
+  reasons TEXT[] NOT NULL DEFAULT '{}',
+  trust_score INT NOT NULL DEFAULT 0,
+  ip INET, device_id TEXT
+);
+CREATE INDEX idx_shield_access_principal ON shield.access_decisions(principal, ts DESC);
+
+CREATE TABLE shield.compliance_reports (        -- SOC 2 / ISO 27001 / GDPR / NDPR / PCI DSS
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kind TEXT NOT NULL CHECK (kind IN ('security-audit-log','incident-report','compliance-report','forensic-record','access-review','security-assessment')),
+  framework TEXT,
+  period_start DATE NOT NULL,
+  period_end DATE NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','review','final')),
+  summary TEXT,
+  evidence JSONB NOT NULL DEFAULT '{}',
+  generated_by TEXT NOT NULL DEFAULT 'shield-autonomous',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ============================================================================
+-- ORGANISM — GLOBAL AI ORGANISM ARCHITECTURE (docs/30, migration 008)
+-- 8 layers · 120,000+ agents · intelligence graph · executive decisions ·
+-- orchestrated execution · evolution experiments · feedback-tuned parameters.
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS organism;
+
+-- 1) Fleet topology — the canonical 8-layer / 120,000+ agent manifest
+CREATE TABLE organism.agent_fleets (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  layer TEXT NOT NULL CHECK (layer IN ('data_analysis','executive','security','operations','automation','product','orchestration','evolution')),
+  layer_name TEXT NOT NULL,
+  sub_swarm TEXT NOT NULL,
+  sub_swarm_name TEXT NOT NULL,
+  agents INT NOT NULL CHECK (agents > 0),
+  functions TEXT[] NOT NULL DEFAULT '{}',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (layer, sub_swarm)
+);
+CREATE INDEX idx_organism_fleets_layer ON organism.agent_fleets(layer);
+
+-- 2) Cognition pulses — one row per full intelligence cycle
+CREATE TABLE organism.pulses (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  pulse_key TEXT UNIQUE NOT NULL,               -- pulse_42 (engine handle)
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  duration_ms INT NOT NULL,
+  agents_total INT NOT NULL,
+  signals JSONB NOT NULL DEFAULT '{}',          -- demandIndex, latencyMs, threatLevel…
+  decisions INT NOT NULL DEFAULT 0,
+  tasks INT NOT NULL DEFAULT 0,
+  experiments INT NOT NULL DEFAULT 0,
+  tunables_after JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_organism_pulses_ts ON organism.pulses(ts DESC);
+
+-- 3) Shared intelligence graph — nodes (the cognitive substrate)
+CREATE TABLE organism.graph_nodes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  node_key TEXT UNIQUE NOT NULL,                -- kpi:demand, city:NG-LAG, threat:platform
+  kind TEXT NOT NULL CHECK (kind IN ('service','city','vertical','customer','vendor','payment','threat','infrastructure','model','kpi')),
+  label TEXT NOT NULL,
+  weight NUMERIC(12,3) NOT NULL DEFAULT 0,      -- recency-weighted importance
+  confidence NUMERIC(4,3) NOT NULL DEFAULT 0,   -- cross-agent agreement
+  observations INT NOT NULL DEFAULT 0,
+  last_seen TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_organism_nodes_weight ON organism.graph_nodes(weight DESC);
+
+-- 4) Graph observations — every agent contribution
+CREATE TABLE organism.graph_observations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  layer TEXT NOT NULL,
+  sub_swarm TEXT NOT NULL,
+  node_key TEXT NOT NULL REFERENCES organism.graph_nodes(node_key),
+  signal TEXT NOT NULL,
+  confidence NUMERIC(4,3) NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+  direction TEXT NOT NULL CHECK (direction IN ('up','down','flat')),
+  payload JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_organism_obs_node ON organism.graph_observations(node_key, ts DESC);
+
+-- 5) Executive decisions (AI board output, governance-validated)
+CREATE TABLE organism.executive_decisions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  decision_key TEXT UNIQUE NOT NULL,
+  pulse_id UUID REFERENCES organism.pulses(id),
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  cluster TEXT NOT NULL CHECK (cluster IN ('CEO','CFO','COO','CTO','CISO','CMO','CHRO','DATA_GOV')),
+  domain TEXT NOT NULL,
+  title TEXT NOT NULL,
+  rationale TEXT NOT NULL,
+  priority INT NOT NULL CHECK (priority BETWEEN 1 AND 5),
+  expected_impact TEXT NOT NULL,
+  confidence NUMERIC(4,3) NOT NULL,
+  validated BOOLEAN NOT NULL DEFAULT TRUE,      -- Data Governance sign-off
+  flags TEXT[] NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_organism_decisions_priority ON organism.executive_decisions(priority, ts DESC);
+
+-- 6) Orchestrated tasks + execution results
+CREATE TABLE organism.execution_tasks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  task_key TEXT UNIQUE NOT NULL,
+  decision_id UUID REFERENCES organism.executive_decisions(id),
+  kind TEXT NOT NULL CHECK (kind IN ('workflow','communication','task','microservice','business_process')),
+  title TEXT NOT NULL,
+  target TEXT NOT NULL,
+  params JSONB NOT NULL DEFAULT '{}',
+  priority INT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('queued','conflict_resolved','succeeded','failed')),
+  assigned_sub_swarm TEXT NOT NULL,
+  ok BOOLEAN,
+  duration_ms INT,
+  executed_at TIMESTAMPTZ
+);
+CREATE INDEX idx_organism_tasks_status ON organism.execution_tasks(status, executed_at DESC);
+
+-- 7) Evolution experiments (meta-learning / self-improvement / simulation / modeling)
+CREATE TABLE organism.evolution_experiments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  experiment_key TEXT UNIQUE NOT NULL,
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  kind TEXT NOT NULL CHECK (kind IN ('meta_learning','self_improvement','simulation','evolution_modeling')),
+  hypothesis TEXT NOT NULL,
+  tunable TEXT NOT NULL,                        -- which organism parameter moves
+  from_value TEXT NOT NULL,
+  to_value TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('proposed','adopted','rejected')),
+  measured_delta TEXT,
+  pulse_id UUID REFERENCES organism.pulses(id)
+);
+
+-- 8) Organism tunables — the live, evolution-managed configuration
+CREATE TABLE organism.tunables (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  latency_threshold_ms INT NOT NULL DEFAULT 800,
+  cost_budget_pct NUMERIC(4,2) NOT NULL DEFAULT 0.62,
+  threat_escalation TEXT NOT NULL DEFAULT 'elevated' CHECK (threat_escalation IN ('low','elevated','high','critical')),
+  churn_alarm_pct NUMERIC(5,2) NOT NULL DEFAULT 6,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by TEXT NOT NULL DEFAULT 'evolution-engine'
+);
+
+-- ============================================================================
+-- AUTONOMOUS AI MOBILITY (docs/31, migration 009) — tracking, intelligence,
+-- autonomy modes, vehicle-aware routing, fleet intel, pipelines, safety and
+-- vehicle cybersecurity. FAMS levels extended with road_zone|fleet|vehicle.
+-- ============================================================================
+-- 0) FAMS: extend activation levels with road-zone / fleet / vehicle scope
+ALTER TABLE fams.feature_flags DROP CONSTRAINT IF EXISTS feature_flags_level_check;
+ALTER TABLE fams.feature_flags ADD CONSTRAINT feature_flags_level_check
+  CHECK (level IN ('global','country','state','city','road_zone','category','vendor','fleet','vehicle','asset'));
+ALTER TABLE fams.service_availability DROP CONSTRAINT IF EXISTS service_availability_level_check;
+ALTER TABLE fams.service_availability ADD CONSTRAINT service_availability_level_check
+  CHECK (level IN ('global','country','state','city','road_zone'));
+ALTER TABLE fams.scheduled_activations DROP CONSTRAINT IF EXISTS scheduled_activations_level_check;
+ALTER TABLE fams.scheduled_activations ADD CONSTRAINT scheduled_activations_level_check
+  CHECK (level IN ('global','country','state','city','road_zone','category','vendor','fleet','vehicle','asset'));
+
+CREATE SCHEMA IF NOT EXISTS mobility;
+
+-- 1) Fleets (fleet-level activation + fleet intelligence grouping)
+CREATE TABLE mobility.fleets (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT UNIQUE NOT NULL,                    -- flt_1
+  name TEXT NOT NULL,
+  owner_vendor_id UUID REFERENCES vendor.vendors(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 2) Vehicles — every asset class, incl. future aircraft & marine
+CREATE TABLE mobility.vehicles (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT UNIQUE NOT NULL,                    -- AV-001
+  cls TEXT NOT NULL CHECK (cls IN ('car','taxi','suv','chauffeur','delivery_bike','motorcycle','truck','bus','autonomous_vehicle','aircraft','marine')),
+  fleet_id UUID REFERENCES mobility.fleets(id),
+  vendor_id UUID REFERENCES vendor.vendors(id),
+  asset_id UUID REFERENCES vendor.assets(id),
+  autonomy_level INT NOT NULL DEFAULT 0 CHECK (autonomy_level BETWEEN 0 AND 5),  -- SAE J3016
+  modes_supported TEXT[] NOT NULL DEFAULT '{manual}',
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','maintenance','offline','retired')),
+  health_score INT NOT NULL DEFAULT 100 CHECK (health_score BETWEEN 0 AND 100),
+  telematics BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_mobility_vehicles_fleet ON mobility.vehicles(fleet_id);
+CREATE INDEX idx_mobility_vehicles_cls ON mobility.vehicles(cls, status);
+
+-- 3) Telemetry frames (Timescale hypertable candidate alongside telemetry.positions)
+CREATE TABLE mobility.vehicle_telemetry (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  vehicle_id UUID NOT NULL REFERENCES mobility.vehicles(id),
+  lat DOUBLE PRECISION NOT NULL,
+  lng DOUBLE PRECISION NOT NULL,
+  speed_kph NUMERIC(6,2),
+  heading_deg NUMERIC(5,1),
+  route_id TEXT,
+  destination JSONB,
+  driver_status TEXT CHECK (driver_status IN ('active','idle','on_break','resting','offline','none')),
+  vehicle_status TEXT CHECK (vehicle_status IN ('on_trip','idle','charging','maintenance','offline')),
+  engine_on BOOLEAN,
+  fuel_or_battery_pct NUMERIC(5,2),
+  health_score INT,
+  road_zone TEXT,                               -- zone:NG-LAG-EKO-ATLANTIC (road-zone activation)
+  meta JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_mobility_tel_vehicle ON mobility.vehicle_telemetry(vehicle_id, ts DESC);
+CREATE INDEX idx_mobility_tel_ts ON mobility.vehicle_telemetry(ts DESC);
+
+-- 4) Monitoring & behaviour alerts (route deviation, stops, geofence, harsh events…)
+CREATE TABLE mobility.vehicle_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  vehicle_id UUID NOT NULL REFERENCES mobility.vehicles(id),
+  type TEXT NOT NULL CHECK (type IN ('route_deviation','unexpected_stop','geofence_violation','excessive_speed','sudden_braking','aggressive_acceleration','dangerous_driving','suspicious_stop','possible_theft','gps_spoofing','unauthorized_usage','possible_accident')),
+  severity TEXT NOT NULL CHECK (severity IN ('critical','high','medium','low')),
+  evidence TEXT[] NOT NULL DEFAULT '{}',
+  reviewed BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE INDEX idx_mobility_events_vehicle ON mobility.vehicle_events(vehicle_id, ts DESC);
+
+-- 5) Driver safety scores (behaviour analytics)
+CREATE TABLE mobility.driver_scores (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  driver_id UUID NOT NULL REFERENCES identity.users(id),
+  score INT NOT NULL CHECK (score BETWEEN 0 AND 100),
+  window_days INT NOT NULL DEFAULT 30,
+  computed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_mobility_driver_scores ON mobility.driver_scores(driver_id, computed_at DESC);
+
+-- 6) Autonomy sessions (operating-mode lifecycle + supervision)
+CREATE TABLE mobility.autonomy_sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  vehicle_id UUID NOT NULL REFERENCES mobility.vehicles(id),
+  requested_mode TEXT NOT NULL CHECK (requested_mode IN ('manual','ai_assisted','supervised_autonomous','full_autonomous')),
+  effective_mode TEXT NOT NULL CHECK (effective_mode IN ('manual','ai_assisted','supervised_autonomous','full_autonomous')),
+  gate_result JSONB NOT NULL DEFAULT '{}',      -- vehicleSupports/technology/environment/legal/safety
+  supervisor_id UUID REFERENCES identity.users(id),
+  disengagements INT NOT NULL DEFAULT 0,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ended_at TIMESTAMPTZ
+);
+CREATE INDEX idx_mobility_sessions_vehicle ON mobility.autonomy_sessions(vehicle_id, started_at DESC);
+
+-- 7) Route intelligence (multi-factor, vehicle-class aware)
+CREATE TABLE mobility.route_plans (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  vehicle_id UUID REFERENCES mobility.vehicles(id),
+  booking_id UUID,
+  factors JSONB NOT NULL DEFAULT '{}',          -- traffic/roadQuality/weather/security/load/requirement
+  options JSONB NOT NULL DEFAULT '[]',          -- scored candidates + reasons
+  selected_route TEXT,
+  autonomous_supported BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 8) Autonomous trips (ride-hailing pipeline)
+CREATE TABLE mobility.autonomous_trips (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id UUID,
+  vehicle_id UUID NOT NULL REFERENCES mobility.vehicles(id),
+  mode TEXT NOT NULL CHECK (mode IN ('manual','ai_assisted','supervised_autonomous','full_autonomous')),
+  pipeline JSONB NOT NULL DEFAULT '[]',         -- 9-step flow state
+  completed BOOLEAN NOT NULL DEFAULT FALSE,
+  fallback_to_human BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 9) Autonomous deliveries (delivery pipeline)
+CREATE TABLE mobility.autonomous_deliveries (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id UUID,
+  vehicle_id UUID REFERENCES mobility.vehicles(id),
+  autonomous BOOLEAN NOT NULL DEFAULT FALSE,
+  pipeline JSONB NOT NULL DEFAULT '[]',         -- 7-step flow state
+  completed BOOLEAN NOT NULL DEFAULT FALSE,
+  blocked_by_fams BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 10) Safety events & responses
+CREATE TABLE mobility.safety_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  vehicle_id UUID REFERENCES mobility.vehicles(id),
+  type TEXT NOT NULL CHECK (type IN ('collision_risk','dangerous_road','vehicle_failure','driver_emergency','passenger_emergency','unusual_movement')),
+  severity NUMERIC(3,2) NOT NULL CHECK (severity BETWEEN 0 AND 1),
+  response JSONB NOT NULL DEFAULT '{}',         -- alerts/workflow/immobilize/escalation
+  immobilized BOOLEAN NOT NULL DEFAULT FALSE,   -- only where supported AND legally permitted
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_mobility_safety_ts ON mobility.safety_events(ts DESC);
+
+-- 11) Vehicle command audit (cybersecurity — signed, authorized commands only)
+CREATE TABLE mobility.vehicle_commands (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  vehicle_id UUID REFERENCES mobility.vehicles(id),
+  principal TEXT NOT NULL,
+  command TEXT NOT NULL,
+  accepted BOOLEAN NOT NULL,
+  signal TEXT CHECK (signal IN ('gps_spoofing','unauthorized_remote_access','communication_attack','malicious_command','sensor_manipulation','vehicle_identity_fraud')),
+  shield_threat UUID,                           -- link to shield.threats when escalated
+  auth_model JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_mobility_commands_vehicle ON mobility.vehicle_commands(vehicle_id, ts DESC);
+
+-- 12) Road zones (sub-city activation scope + geofence)
+CREATE TABLE mobility.road_zones (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT UNIQUE NOT NULL,                    -- zone:NG-LAG-EKO-ATLANTIC
+  name TEXT NOT NULL,
+  city_code TEXT REFERENCES geo.cities(code),
+  boundary GEOMETRY(Polygon, 4326),
+  av_mapped BOOLEAN NOT NULL DEFAULT FALSE,     -- validated AV corridor
+  supervised_autonomy_pilot BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_mobility_zones_geom ON mobility.road_zones USING GIST(boundary);
+
+-- ============================================================================
+-- INTERSTATE LOGISTICS & LONG-DISTANCE FREIGHT (docs/32, migration 010) —
+-- nationwide freight marketplace on verified third-party partners; FAMS-gated
+-- (features ilst.*, cargo/vehicle/route categories, states, vendors).
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS interstate;
+
+-- 1) Freight vehicle catalog (14 categories; platform-wide reference data)
+CREATE TABLE interstate.vehicle_categories (
+  category TEXT PRIMARY KEY,                        -- heavy_truck, refrigerated_truck…
+  label TEXT NOT NULL,
+  capacity_kg INT NOT NULL CHECK (capacity_kg > 0),
+  length_m NUMERIC(4,1) NOT NULL, width_m NUMERIC(4,1) NOT NULL, height_m NUMERIC(4,1) NOT NULL,
+  cargo_support TEXT[] NOT NULL DEFAULT '{}',
+  refrigerated BOOLEAN NOT NULL DEFAULT FALSE,
+  rate_index NUMERIC(3,1) NOT NULL DEFAULT 1.0,
+  min_road_class TEXT NOT NULL DEFAULT 'street' CHECK (min_road_class IN ('street','secondary','primary','highway','truck_route'))
+);
+
+-- 2) Vendor fleet units — capacity/dimensions/insurance/maintenance/availability/regions
+CREATE TABLE interstate.freight_vehicles (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  vendor_id UUID NOT NULL REFERENCES vendor.vendors(id),
+  category TEXT NOT NULL REFERENCES interstate.vehicle_categories(category),
+  plate TEXT UNIQUE NOT NULL,
+  capacity_kg INT NOT NULL,
+  dimensions_m JSONB NOT NULL,                     -- {l,w,h}
+  max_weight_kg INT NOT NULL,
+  cargo_support TEXT[] NOT NULL DEFAULT '{}',
+  insurance_policy TEXT,
+  insurance_expiry DATE,
+  maintenance_records JSONB NOT NULL DEFAULT '[]', -- [{at, type, odometerKm, notes}]
+  next_maintenance_km INT,
+  availability_calendar DATERANGE,                 -- booked/free windows
+  operating_regions TEXT[] NOT NULL DEFAULT '{}',  -- state codes
+  telematics_vehicle UUID REFERENCES mobility.vehicles(id),
+  status TEXT NOT NULL DEFAULT 'available' CHECK (status IN ('available','on_haul','maintenance','retired')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_ilst_vehicles_vendor ON interstate.freight_vehicles(vendor_id, status);
+CREATE INDEX idx_ilst_vehicles_avail ON interstate.freight_vehicles USING GIST(availability_calendar);
+
+-- 3) Vendor verification chain (7 steps; compliance_approval is the final gate)
+CREATE TABLE interstate.vendor_verifications (
+  vendor_id UUID PRIMARY KEY REFERENCES vendor.vendors(id),
+  vendor_type TEXT NOT NULL CHECK (vendor_type IN ('trucking_company','fleet_operator','independent_truck_owner','freight_broker','warehouse_operator','cold_chain_operator','distribution_company')),
+  business_verification TEXT NOT NULL DEFAULT 'pending' CHECK (business_verification IN ('pending','approved','rejected')),
+  identity_verification TEXT NOT NULL DEFAULT 'pending' CHECK (identity_verification IN ('pending','approved','rejected')),
+  tax_verification TEXT NOT NULL DEFAULT 'pending' CHECK (tax_verification IN ('pending','approved','rejected')),
+  insurance_verification TEXT NOT NULL DEFAULT 'pending' CHECK (insurance_verification IN ('pending','approved','rejected')),
+  vehicle_verification TEXT NOT NULL DEFAULT 'pending' CHECK (vehicle_verification IN ('pending','approved','rejected')),
+  driver_verification TEXT NOT NULL DEFAULT 'pending' CHECK (driver_verification IN ('pending','approved','rejected')),
+  compliance_approval TEXT NOT NULL DEFAULT 'pending' CHECK (compliance_approval IN ('pending','approved','rejected')),
+  decided_by TEXT, decided_at TIMESTAMPTZ,
+  active BOOLEAN GENERATED ALWAYS AS (
+    business_verification = 'approved' AND identity_verification = 'approved'
+    AND tax_verification = 'approved' AND insurance_verification = 'approved'
+    AND vehicle_verification = 'approved' AND driver_verification = 'approved'
+    AND compliance_approval = 'approved') STORED
+);
+
+-- 4) Shipments (cargo, stops, status, vehicle/driver, ETA, delivery confirmation)
+CREATE TABLE interstate.shipments (
+  id TEXT PRIMARY KEY,                              -- shp_1
+  service TEXT NOT NULL CHECK (service IN ('ftl','ltl','shared_cargo','bulk_cargo','container','cold_chain','heavy_equipment','construction_material','agricultural_produce','fmcg','manufacturing','warehouse_to_warehouse','b2b','b2c','government','ngo_humanitarian','medical_pharma','ecommerce_line_haul','livestock','vehicle_transport','machinery')),
+  customer_id UUID NOT NULL REFERENCES identity.users(id),
+  corporate_account_id UUID,                        -- corporate logistics
+  vendor_id UUID REFERENCES vendor.vendors(id),
+  driver_id UUID REFERENCES identity.users(id),
+  freight_vehicle_id UUID REFERENCES interstate.freight_vehicles(id),
+  cargo_type TEXT NOT NULL,                         -- construction/cold_chain/…
+  cargo_value_minor BIGINT NOT NULL DEFAULT 0,
+  weight_kg INT NOT NULL CHECK (weight_kg > 0),
+  dimensions_m JSONB NOT NULL,
+  booking_option TEXT NOT NULL CHECK (booking_option IN ('instant','scheduled','quote_request','compare_providers','one_way','return_trip','recurring','dedicated_fleet')),
+  scheduled_for TIMESTAMPTZ,
+  recurrence TEXT CHECK (recurrence IN ('weekly','monthly')),
+  status TEXT NOT NULL DEFAULT 'quote_requested' CHECK (status IN ('quote_requested','quote_accepted','awaiting_pickup','driver_assigned','cargo_loaded','in_transit','checkpoint_update','delivered','completed','cancelled','disputed')),
+  quote_minor BIGINT,
+  payment_mode TEXT CHECK (payment_mode IN ('instant','escrow','corporate_billing','partial','milestone')),
+  escrow_id UUID REFERENCES money.escrow_holds(id),
+  settled_minor BIGINT,
+  eta_at TIMESTAMPTZ,
+  current_lat DOUBLE PRECISION, current_lng DOUBLE PRECISION,
+  rating_score INT CHECK (rating_score BETWEEN 1 AND 5),
+  rating_comment TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_ilst_shipments_customer ON interstate.shipments(customer_id, created_at DESC);
+CREATE INDEX idx_ilst_shipments_vendor ON interstate.shipments(vendor_id, status);
+CREATE INDEX idx_ilst_shipments_status ON interstate.shipments(status) WHERE status NOT IN ('completed','cancelled');
+
+-- 5) Stops — single/multi pickup + single/multi destination
+CREATE TABLE interstate.shipment_stops (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  shipment_id TEXT NOT NULL REFERENCES interstate.shipments(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('pickup','dropoff')),
+  sequence INT NOT NULL,
+  label TEXT NOT NULL,
+  lat DOUBLE PRECISION NOT NULL, lng DOUBLE PRECISION NOT NULL,
+  state_code TEXT NOT NULL REFERENCES geo.states(code),
+  completed_at TIMESTAMPTZ,
+  UNIQUE (shipment_id, kind, sequence)
+);
+
+-- 6) Quote comparisons (multi-provider offers per request)
+CREATE TABLE interstate.quotes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  shipment_id TEXT REFERENCES interstate.shipments(id),
+  service TEXT NOT NULL,
+  origin_state TEXT NOT NULL REFERENCES geo.states(code),
+  destination_state TEXT NOT NULL REFERENCES geo.states(code),
+  distance_km INT NOT NULL,
+  offers JSONB NOT NULL DEFAULT '[]',               -- [{vendorId, priceMinor, etaHours, rating…}]
+  recommended_vendor UUID REFERENCES vendor.vendors(id),
+  best_vehicle_category TEXT REFERENCES interstate.vehicle_categories(category),
+  estimate_minor BIGINT NOT NULL,
+  estimate_eta_hours NUMERIC(5,1) NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 7) Tracking events — GPS/checkpoints/ETA/geofence (route playback source)
+CREATE TABLE interstate.tracking_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  shipment_id TEXT NOT NULL REFERENCES interstate.shipments(id) ON DELETE CASCADE,
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  lat DOUBLE PRECISION NOT NULL, lng DOUBLE PRECISION NOT NULL,
+  label TEXT, note TEXT,
+  eta_at TIMESTAMPTZ,
+  outside_geofence BOOLEAN NOT NULL DEFAULT FALSE,
+  created_via TEXT NOT NULL DEFAULT 'telemetry' CHECK (created_via IN ('telemetry','checkpoint','whatsapp','driver_app'))
+);
+CREATE INDEX idx_ilst_tracking_playback ON interstate.tracking_events(shipment_id, ts);
+
+-- 8) Shareable tracking links (authorized recipients, TTL)
+CREATE TABLE interstate.tracking_links (
+  token TEXT PRIMARY KEY,
+  shipment_id TEXT NOT NULL REFERENCES interstate.shipments(id) ON DELETE CASCADE,
+  recipient TEXT NOT NULL,
+  granted_by UUID REFERENCES identity.users(id),
+  expires_at TIMESTAMPTZ NOT NULL,
+  revoked BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 9) Cargo security — seals, tamper/geofence alerts, proofs & signatures
+CREATE TABLE interstate.cargo_inspections (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  shipment_id TEXT NOT NULL REFERENCES interstate.shipments(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('seal_install','tamper_alert','geofence_alert','driver_identity_check','cargo_verification','proof_of_pickup','proof_of_delivery','photo_confirmation')),
+  at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  seal_id TEXT,
+  photos TEXT[] NOT NULL DEFAULT '{}',
+  digital_signature TEXT,
+  signed_by TEXT,
+  detail TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_ilst_inspections_shipment ON interstate.cargo_inspections(shipment_id, at DESC);
+
+-- 10) Shipment insurance policies
+CREATE TABLE interstate.shipment_insurance (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  shipment_id TEXT NOT NULL REFERENCES interstate.shipments(id) ON DELETE CASCADE,
+  policy_no TEXT NOT NULL,
+  insured_minor BIGINT NOT NULL,
+  premium_minor BIGINT NOT NULL,
+  underwriter TEXT NOT NULL,
+  issued_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 11) Corporate logistics — accounts, departments, approvals, budgets
+CREATE TABLE interstate.corporate_accounts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT UNIQUE NOT NULL,                        -- corp_dangote
+  name TEXT NOT NULL,
+  billing_type TEXT NOT NULL DEFAULT 'monthly_invoice' CHECK (billing_type IN ('monthly_invoice','prepaid','wallet')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE interstate.corporate_departments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id UUID NOT NULL REFERENCES interstate.corporate_accounts(id) ON DELETE CASCADE,
+  code TEXT NOT NULL, name TEXT NOT NULL,
+  budget_minor BIGINT NOT NULL DEFAULT 0,
+  spent_minor BIGINT NOT NULL DEFAULT 0,
+  UNIQUE (account_id, code)
+);
+CREATE TABLE interstate.corporate_approvers (
+  department_id UUID NOT NULL REFERENCES interstate.corporate_departments(id) ON DELETE CASCADE,
+  user_id UUID NOT NULL REFERENCES identity.users(id),
+  PRIMARY KEY (department_id, user_id)
+);
+CREATE TABLE interstate.transport_requests (
+  id TEXT PRIMARY KEY,                              -- req_1
+  account_id UUID NOT NULL REFERENCES interstate.corporate_accounts(id),
+  department_id UUID NOT NULL REFERENCES interstate.corporate_departments(id),
+  requested_by UUID NOT NULL REFERENCES identity.users(id),
+  service TEXT NOT NULL,
+  origin_state TEXT NOT NULL REFERENCES geo.states(code),
+  dest_state TEXT NOT NULL REFERENCES geo.states(code),
+  estimated_minor BIGINT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','booked')),
+  decided_by UUID REFERENCES identity.users(id),
+  shipment_id TEXT REFERENCES interstate.shipments(id),
+  note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE interstate.corporate_invoices (
+  id TEXT PRIMARY KEY,                              -- inv_corp_x_2026-08
+  account_id UUID NOT NULL REFERENCES interstate.corporate_accounts(id),
+  period CHAR(7) NOT NULL,                          -- 2026-08
+  lines JSONB NOT NULL DEFAULT '[]',
+  total_minor BIGINT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'issued' CHECK (status IN ('draft','issued','paid','overdue')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 12) Corridors & FAMS-gated route control (future: cross-border legs)
+CREATE TABLE interstate.corridors (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  code TEXT UNIQUE NOT NULL,                        -- route.NG-LAG-NG-KAN (FAMS category target)
+  origin_state TEXT NOT NULL REFERENCES geo.states(code),
+  destination_state TEXT NOT NULL REFERENCES geo.states(code),
+  distance_km INT NOT NULL,
+  avg_transit_hours NUMERIC(5,1),
+  toll_ngn INT NOT NULL DEFAULT 0,
+  security_risk NUMERIC(3,2) NOT NULL DEFAULT 0.2 CHECK (security_risk BETWEEN 0 AND 1),
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  cross_border BOOLEAN NOT NULL DEFAULT FALSE,      -- future phase
+  partner_country CHAR(2)                           -- future: GH/KE/ZA…
+);
+
+-- ============================================================================
+-- ROW-LEVEL SECURITY EXAMPLE (multi-tenant isolation for future split)
+-- ============================================================================
+ALTER TABLE booking.bookings ENABLE ROW LEVEL SECURITY;
+CREATE POLICY bookings_city_isolation ON booking.bookings
+  USING (true);  -- tightened per-service roles at physical-split stage

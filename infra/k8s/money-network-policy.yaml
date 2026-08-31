@@ -1,0 +1,33 @@
+# Money namespace: egress deny to internet — PSP callbacks arrive via gateway.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: money-default-deny-egress
+  namespace: money
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { name: data }     # Postgres/Redis/Kafka
+        - namespaceSelector:
+            matchLabels: { name: observability }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: money-allow-psp-egress
+  namespace: money
+spec:
+  podSelector:
+    matchLabels: { app: payment-service }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 169.254.169.254/32   # block metadata endpoints
+      ports: [{ port: 443, protocol: TCP }]

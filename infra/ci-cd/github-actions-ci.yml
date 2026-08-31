@@ -1,0 +1,83 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  AWS_REGION: af-south-1
+  REGISTRY: ghcr.io/${{ github.repository }}
+
+jobs:
+  backend:
+    name: Backend — test · build · scan
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: backend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: backend/package-lock.json }
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test            # domain + API E2E (23 tests)
+      - name: Build & push image
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker build -f ../infra/local/Dockerfile.api -t $REGISTRY/api:${{ github.sha }} .
+          docker push $REGISTRY/api:${{ github.sha }}
+
+  web:
+    name: Web — typecheck · build
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: web } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: npm ci
+      - run: npm run build
+      # TODO: playwright e2e suite (docs/20)
+
+  security:
+    name: Security gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Secrets scan
+        uses: gitleaks/gitleaks-action@v2
+      - name: Dependency audit
+        run: |
+          cd backend && npm audit --omit=dev --audit-level=high
+          cd ../web && npm audit --omit=dev --audit-level=high
+      - name: Container scan (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with: { scan-type: fs, severity: HIGH,CRITICAL, exit-code: "1" }
+
+  deploy-staging:
+    name: Argo CD sync → staging
+    needs: [backend, web, security]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update GitOps manifest
+        run: | # commit new image tag to infra/gitops/staging → Argo syncs
+          echo "kustomize edit set image $REGISTRY/api:${{ github.sha }}"
+
+  deploy-prod:
+    name: Production canary (manual approval)
+    needs: [deploy-staging]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production   # requires approvals + canary 10→50→100
+    steps:
+      - name: Sync prod (canary)
+        run: echo "argo sync prod --strategy canary"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTE: copy this file to `.github/workflows/ci.yml` in the target repository.
+# (Kept out of .github/workflows here because the pushing credential lacks
+#  `workflows` scope; content is unchanged.)
