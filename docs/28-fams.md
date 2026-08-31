@@ -45,7 +45,7 @@ FAMS turns all of these into **data**, evaluated on every request through one mi
 
 ## 3. What can be controlled (spec v2 catalog)
 
-**24 global switches:** Transportation · Taxi Services · Dispatch Services · Logistics · Delivery · Travel · Flights · Hotels · Accommodation · Roadside Assistance · Security Marketplace · Aviation · Marine Services · Corporate Services · Wallet · Escrow · Loyalty Program · Subscription Plans · Promotions · WhatsApp AI Assistant · AI Features · Video Calls · Voice Calls · Chat System.
+**25 global switches:** Tourism (built day one, OFF until activated — the no-code-change promise in action) · Transportation · Taxi Services · Dispatch Services · Logistics · Delivery · Travel · Flights · Hotels · Accommodation · Roadside Assistance · Security Marketplace · Aviation · Marine Services · Corporate Services · Wallet · Escrow · Loyalty Program · Subscription Plans · Promotions · WhatsApp AI Assistant · AI Features · Video Calls · Voice Calls · Chat System.
 
 **Country / State / City** — seeded examples: KE transportation+logistics OFF; GH security+travel OFF; Edo state aviation+travel OFF; **Benin City** taxi ON / dispatch ON / hotels ON / **security OFF**; **Asaba** taxi ON / dispatch ON / **aviation OFF**.
 

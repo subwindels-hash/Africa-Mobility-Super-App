@@ -94,7 +94,11 @@ INSERT INTO platform.service_categories (vertical,code,name,booking_mode,base_fa
  ('accommodation','apartment.booking','Apartment Booking','instant',0,'{"nightly":true}',NULL,30),
  ('accommodation','shortlet.reservation','Short-Let Reservations','instant',0,'{"nightly":true}',NULL,40),
  ('accommodation','vacation.rental','Vacation Rentals','instant',0,'{"nightly":true}',NULL,50),
- ('accommodation','corporate.accommodation','Corporate Accommodation','scheduled',0,'{"nightly":true,"corporate":true}',NULL,60);
+ ('accommodation','corporate.accommodation','Corporate Accommodation','scheduled',0,'{"nightly":true,"corporate":true}',NULL,60),
+ ('tourism','tourism.package','Tour Packages','quote_based',0,'{"custom":true}',NULL,10),
+ ('tourism','tourism.experiences','Experiences & Excursions','instant',0,'{"per_person":true}',NULL,20),
+ ('tourism','tourism.guide','Tour Guide Services','scheduled',0,'{"per_day":true}',NULL,30),
+ ('tourism','tourism.visa','Visa & Travel Documentation Assistance','quote_based',0,'{"per_application":true}',NULL,40);
 
 -- Subscription plans ---------------------------------------------------------
 INSERT INTO platform.subscription_plans (tier,name,monthly_price,currency,max_listings,monthly_booking_cap,commission_discount_pts,payout_sla,features) VALUES

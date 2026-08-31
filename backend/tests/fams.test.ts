@@ -270,3 +270,25 @@ describe('FAMS — spec v2 expansion (24 global switches, categories, groups, as
     expect(state.note).toMatch(/Edo/i);
   });
 });
+
+describe('FAMS — tourism: built day one, activated without code change', () => {
+  it('tourism vertical is OFF at every phase (not in the phase plan) but flips on via a rule', () => {
+    for (const phase of [1, 4, 5]) {
+      const e = engine(phase);
+      expect(e.verticalAvailable('tourism', NG)).toBe(false);
+      expect(e.evaluate('category', 'tourism.package', NG).available).toBe(false); // category inherits vertical
+    }
+    // admin activation at runtime — no deploy, no code change
+    const e = engine(4);
+    e.upsertRule({ level: 'global', target: { kind: 'vertical', code: 'tourism' }, value: 'on', note: 'tourism go-live', updatedBy: 'admin' });
+    expect(e.verticalAvailable('tourism', NG)).toBe(true);
+    expect(e.evaluate('category', 'tourism.package', NG).available).toBe(true);
+  });
+
+  it('tourism can be city-scoped on launch (Lagos only) while staying off elsewhere', () => {
+    const e = engine(4);
+    e.upsertRule({ level: 'city', selector: 'NG-LAG', target: { kind: 'vertical', code: 'tourism' }, value: 'on', note: 'Lagos pilot' });
+    expect(e.verticalAvailable('tourism', NG)).toBe(true);                    // NG ctx is Lagos
+    expect(e.verticalAvailable('tourism', { country: 'NG', state: 'NG-ED', city: 'NG-BNI', userGroups: ['customers'] })).toBe(false);
+  });
+});

@@ -81,6 +81,7 @@ export const CATEGORY_VERTICAL: Record<string, string> = {
   security: 'security',
   roadside: 'roadside',
   hotel: 'accommodation', apartment: 'accommodation', shortlet: 'accommodation', vacation: 'accommodation',
+  tourism: 'tourism', tour: 'tourism',
   corporate: 'corporate_services',
 };
 
@@ -109,7 +110,7 @@ export const PLATFORM_MODULES = [
   'transportation', 'taxi', 'dispatch', 'logistics', 'delivery', 'travel', 'flights', 'hotels',
   'accommodation', 'roadside', 'security_marketplace', 'aviation', 'marine', 'corporate_services',
   'wallet', 'escrow', 'loyalty', 'subscriptions', 'promotions', 'whatsapp_ai', 'ai_features',
-  'video_calls', 'voice_calls', 'chat',
+  'video_calls', 'voice_calls', 'chat', 'tourism',
 ] as const;
 
 /** Spec user groups — features can be scoped to any combination. */
@@ -128,6 +129,7 @@ export const VERTICAL_MODULE: Record<string, string> = {
   transportation: 'transportation', logistics: 'logistics', travel: 'travel',
   aviation: 'aviation', marine: 'marine', security: 'security_marketplace',
   corporate_services: 'corporate_services', roadside: 'roadside', accommodation: 'hotels',
+  tourism: 'tourism',
 };
 
 interface Candidate {

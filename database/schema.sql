@@ -16,7 +16,7 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 -- ============================================================================
 -- ENUM TYPES
 -- ============================================================================
-CREATE TYPE user_type AS ENUM ('customer','driver','dispatch_rider','vendor','fleet_owner','travel_agent','security_provider','jet_operator','helicopter_operator','corporate_client','support_agent','admin','super_admin');
+CREATE TYPE user_type AS ENUM ('customer','driver','dispatch_rider','vendor','fleet_owner','travel_agent','hotel_partner','security_provider','jet_operator','helicopter_operator','boat_operator','corporate_client','support_agent','admin','super_admin');
 CREATE TYPE kyc_level AS ENUM ('L1_PHONE','L2_IDENTITY','L3_ADDRESS','L4_BUSINESS');
 CREATE TYPE verification_status AS ENUM ('unverified','pending','in_review','verified','rejected','expired','auto_suspended');
 CREATE TYPE vendor_type AS ENUM ('taxi_operator','fleet_owner','luxury_vehicle_owner','chauffeur_company','dispatch_rider','logistics_company','courier_company','travel_agency','tour_operator','hotel','security_company','private_jet_operator','helicopter_operator','charter_company','boat_operator','corporate_service_provider');
@@ -25,7 +25,7 @@ CREATE TYPE subscription_plan_tier AS ENUM ('free','standard','professional','en
 CREATE TYPE asset_type AS ENUM ('car_economy','car_standard','car_premium','car_vip','car_luxury','car_executive','car_suv','motorcycle_dispatch','motorcycle_delivery','private_jet','helicopter','charter_aircraft','air_ambulance','boat','yacht','water_taxi');
 CREATE TYPE asset_status AS ENUM ('pending_docs','active','in_trip','maintenance','suspended','retired');
 CREATE TYPE booking_type AS ENUM ('instant','scheduled','corporate','recurring','quote_based');
-CREATE TYPE service_vertical AS ENUM ('transportation','logistics','travel','aviation','marine','security','corporate_services','roadside','accommodation');
+CREATE TYPE service_vertical AS ENUM ('transportation','logistics','travel','aviation','marine','security','corporate_services','roadside','accommodation','tourism');
 CREATE TYPE booking_status AS ENUM ('draft','priced','requested','matched','confirmed','en_route','in_progress','completed','settled','cancelled','expired','disputed','refunded');
 CREATE TYPE booking_priority AS ENUM ('normal','priority','vip');
 CREATE TYPE payment_method_type AS ENUM ('wallet','card','bank_transfer','ussd','cash','corporate_account');

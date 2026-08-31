@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import * as wa from '../libs/whatsapp/src/index';
+const { processInbound, setMediaPipeline, mediaPipeline } = wa;
 
 const PHONE = '+2348012345678';
 const msg = (text: string, phone = PHONE) => ({ from: phone, type: 'text' as const, text, timestamp: new Date().toISOString() });
@@ -267,5 +268,25 @@ describe('Webhook', () => {
     await say('1');
     expect(wa.stats.bookingsCreated).toBeGreaterThanOrEqual(1);
     expect(wa.stats.conversations).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('WhatsApp AI — document input (OCR path)', () => {
+  const doc = { from: '+2348012345111', type: 'document' as const, mediaId: 'doc_901', timestamp: new Date().toISOString() };
+
+  it('unreadable document → guidance reply, no crash', async () => {
+    const out = await processInbound(doc as any);
+    expect(out.text).toContain('📄');
+    expect(out.text.toLowerCase()).toContain('document');
+  });
+
+  it('document with OCR text routes like a text message', async () => {
+    setMediaPipeline({
+      ...mediaPipeline,
+      async extractFromDocument(id) { return id === 'doc_902' ? { ocrText: 'Book me a taxi from Lekki to Ikeja', docKind: 'note' } : { ocrText: '' }; },
+    });
+    const out = await processInbound({ ...doc, mediaId: 'doc_902' } as any);
+    expect(out.meta?.intent).toBe('book_transport');
+    setMediaPipeline({ async transcribe() { return ''; }, async extractFromImage() { return { ocrText: '', locations: [] }; }, async extractFromDocument() { return { ocrText: '' }; } });
   });
 });

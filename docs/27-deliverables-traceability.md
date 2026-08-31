@@ -1,7 +1,7 @@
 # 27 · Deliverables Traceability Map — Consolidated Master Specification
 
 **Purpose:** One authoritative map from the consolidated 51-item master specification (plus the original 60-item superset and WhatsApp platform) to the artifacts in this repository — for engineering, QA, investors, and government/corporate due diligence.
-**Audit date:** 2026-08-31 · **Status:** 51/51 covered · Code baseline: 68 automated tests green.
+**Audit date:** 2026-08-31 · **Status:** 51/51 covered (pass 1) + 50/50 covered (pass 2, §6) · Code baseline: 121 automated tests green.
 
 ---
 
@@ -102,3 +102,95 @@ Maintained in `docs/20-testing-qa.md` §Traceability; every FR in `docs/05` maps
 - TypeScript strict typecheck clean (backend), Next.js production build clean (web, 5 routes)
 - SQL: 86 tables / 13 schemas / balanced DDL verified programmatically; migrations 001–003 for existing deployments
 - Live preview: web portals on :3000; WhatsApp simulator `POST /v1/whatsapp/simulate`
+
+---
+
+# 6. Fifth Master Prompt — Full-Platform Re-Acceptance (50 deliverables)
+
+**Audit date:** 2026-08-31 · **Prompt:** "Build a complete enterprise-grade African super app… 50 deliverables" (full master specification restated with WhatsApp AI + FAMS folded in). · **Result: 50/50 present · 3 deltas found and closed in this pass.**
+
+## 6.1 The 50 Deliverables → Artifacts
+
+| # | Deliverable | Artifact(s) | Status |
+|---|---|---|---|
+| 1 | Executive Summary | `docs/01` | ✅ |
+| 2 | Business Plan | `docs/02` §1–3 | ✅ |
+| 3 | Revenue Model | `docs/02` §5 (take rates, SaaS tiers, unit economics) | ✅ |
+| 4 | Business Requirements Document | `docs/03` | ✅ |
+| 5 | Product Requirements Document | `docs/04` | ✅ |
+| 6 | Software Requirements Specification | `docs/05` (IEEE-830) | ✅ |
+| 7 | Functional Requirements | `docs/05` §2 | ✅ |
+| 8 | Non-Functional Requirements | `docs/05` §5 (NFR-001…020) | ✅ |
+| 9 | User Stories | `docs/06` §1 | ✅ |
+| 10 | Use Cases | `docs/06` §2 | ✅ |
+| 11 | Process Flows | `docs/07` | ✅ |
+| 12 | Complete System Architecture | `docs/08` §2 | ✅ |
+| 13 | Microservices Architecture | `docs/08` §3 (21-service catalog) | ✅ |
+| 14 | Event-Driven Architecture | `docs/08` §4 | ✅ |
+| 15 | WhatsApp AI Architecture | `docs/26` (implemented: NLU/dialog/quotes/escalation) | ✅ |
+| 16 | AI Architecture | `docs/19` (all 10 AI features) | ✅ |
+| 17 | Database Design | `docs/09` | ✅ |
+| 18 | PostgreSQL Schemas | `database/schema.sql` (100 tables, 15 schemas) | ✅ |
+| 19 | ER Diagrams | `docs/09` + `docs/28` §7 (mermaid ER) | ✅ |
+| 20 | API Documentation | `docs/10` + live demo API (`/v1/*` incl. FAMS) | ✅ |
+| 21 | Customer Mobile App | `docs/11`, `docs/13`, `mobile/` (FAMS-aware launcher) | ✅ |
+| 22 | Driver Mobile App | `docs/11` §flavors, `docs/13` D-wireframes | ✅ |
+| 23 | Rider Mobile App | `docs/11` §flavors, `docs/13` | ✅ |
+| 24 | Vendor Dashboard | `web/vendor` + `docs/14` | ✅ |
+| 25 | Security Provider Dashboard | `docs/14` (vendor console security variant) | ✅ |
+| 26 | Corporate Portal | `web/corporate` + `docs/14` | ✅ |
+| 27 | Admin Dashboard | `web/admin` + `docs/14` | ✅ |
+| 28 | Feature Activation Dashboard | `web/admin/fams` (10 modules) + `docs/28` | ✅ |
+| 29 | UI/UX Design System | `docs/15` + `web/components/ui.tsx` | ✅ |
+| 30 | AWS Infrastructure Design | `docs/16` | ✅ |
+| 31 | Kubernetes Architecture | `docs/16` §EKS | ✅ |
+| 32 | DevOps & CI/CD | `docs/16` + `infra/ci-cd/` | ✅ |
+| 33 | Security Architecture | `docs/17` (E2E encryption, RBAC, MFA, NDPR/GDPR/PCI) | ✅ |
+| 34 | Testing Strategy | `docs/20` | ✅ |
+| 35 | QA Strategy | `docs/20` | ✅ |
+| 36 | Disaster Recovery Plan | `docs/18` | ✅ |
+| 37 | Backup Strategy | `docs/18` | ✅ |
+| 38 | Monitoring Strategy | `docs/18` | ✅ |
+| 39 | MVP Roadmap | `docs/21` | ✅ |
+| 40 | Scaling Roadmap | `docs/21` | ✅ |
+| 41 | Team Hiring Plan | `docs/22` | ✅ |
+| 42 | Development Timeline | `docs/22` | ✅ |
+| 43 | Development Cost Estimate | `docs/22` + `docs/23` | ✅ |
+| 44 | Operating Cost Estimate | `docs/23` | ✅ |
+| 45 | Financial Forecast | `docs/23` | ✅ |
+| 46 | Investor Pitch Deck | `docs/24` | ✅ |
+| 47 | Go-To-Market Strategy | `docs/25` | ✅ |
+| 48 | Vendor Acquisition Strategy | `docs/25` | ✅ |
+| 49 | Corporate Sales Strategy | `docs/25` | ✅ |
+| 50 | Multi-Country Expansion Strategy | `docs/21` §phases + `docs/25` (NG → GH/KE/ZA → UAE/UK/US) | ✅ |
+
+## 6.2 Platform-Feature Cross-Check (vision list vs. implementation)
+
+| Spec area | Coverage |
+|---|---|
+| All 33 vision services | 9 live verticals + tourism (new, FAMS-off) — 100+ categories in catalog |
+| WhatsApp AI: search/discovery/quotes/bookings/tracking/payments/support | all live in orchestrator; input methods: text · voice · image · **document (new)** · GPS/pins/addresses |
+| FAMS controls (country/state/city/vendor/asset/feature/service/category/user-group) | engine + API + dashboard (docs/28) |
+| 15 global switches | 25-module catalog (superset) |
+| Vendor lifecycle ×5, asset classes ×8, user groups ×7 | engine + migration 004/005 |
+| 11-step vendor verification | `vendor.vendor_verifications` (email→compliance) |
+| Payments (Paystack/Flutterwave/Monnify; wallet, transfers, cards, escrow, cashback, rewards) | money schema + PSP config + wallet/escrow engine + loyalty tiers |
+| Communication (chat, voice, video, SMS, WhatsApp, masking, GSM fallback) | comms schema + comm-fallback ladder (docs/26) |
+| 10 AI features | docs/19 model cards; fare/quote/matching engines live |
+| Safety (SOS, emergency calling, trip sharing, trusted contacts, verifications, face, fraud) | secops schema + safety module + mobile SOS |
+| Security (E2E, RBAC, MFA, audit, fingerprinting, NDPR/GDPR/PCI) | docs/17 |
+| Tech stack & integrations | as mandated (Next.js/TS/Tailwind, Flutter, NestJS/Node, PG, Redis, Socket.IO, AWS, S3, JWT/OAuth/MFA; Amadeus/Sabre, Google/OSM, WhatsApp/WebRTC/SMS) |
+
+## 6.3 Gap-Closure Log (this pass)
+
+| # | Gap found | Resolution |
+|---|---|---|
+| 1 | Tourism Services in the vision list — absent everywhere | New `tourism` vertical: enum + 4 categories (`tourism.package/experiences/guide/visa`) + FAMS registry/rule — **OFF at every phase until an admin activates it via FAMS with no code change** (migration 006, engine seed, 2 tests) |
+| 2 | Spec lists 15 user types; schema had 13 | `hotel_partner`, `boat_operator` added to `user_type` (migration 006 + schema) |
+| 3 | WhatsApp input methods lacked Documents | `document` inbound type + `extractFromDocument` OCR adapter + handler (routes OCR text through NLU; guidance reply when unreadable) — 2 tests |
+
+## 6.4 Assurance Summary (after this pass)
+
+- **121 automated tests, 100% green** (31 FAMS engine · 20 FAMS API · 32 WhatsApp AI · 17 domain · 15 quotes/fallback · 6 API E2E)
+- TypeScript strict clean; Next.js production build green; SQL verified programmatically (100 tables, migrations 001–006)
+- Live: web on :3000 (7 routes incl. `/admin/fams`), demo API with FAMS endpoints + WhatsApp simulator

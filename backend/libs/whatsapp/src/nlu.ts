@@ -309,7 +309,7 @@ export function classify(text: string): NluResult {
 }
 
 /** Voice notes & images arrive as media; this wraps their extracted transcript into the same NLU. */
-export function classifyTranscript(transcript: string, source: 'voice' | 'image', extracted?: { locations?: NluEntityLocation[] }): NluResult {
+export function classifyTranscript(transcript: string, source: 'voice' | 'image' | 'document', extracted?: { locations?: NluEntityLocation[] }): NluResult {
   const r = classify(transcript);
   if (extracted?.locations?.length && !r.entities.destination) {
     r.entities.destination = extracted.locations[0];

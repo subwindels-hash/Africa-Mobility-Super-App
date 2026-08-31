@@ -13,13 +13,16 @@ export const PHASES: Record<number, { name: string; enable: string[] }> = {
   5: { name: 'Phase 5 — Marine services', enable: ['marine'] },
 };
 
-const ALL_VERTICALS = ['transportation', 'logistics', 'travel', 'hotels', 'corporate_services', 'roadside', 'security', 'aviation', 'marine'];
+const ALL_VERTICALS = ['transportation', 'logistics', 'travel', 'hotels', 'corporate_services', 'roadside', 'security', 'aviation', 'marine', 'tourism'];
 
 // modules that follow a phase but are not verticals (platform switches)
 const PHASE_MODULES: Record<number, string[]> = {
   1: ['delivery', 'voice_calls', 'chat', 'ai_features'],
   2: ['video_calls'],
-  // marine module switch flips with the marine vertical at phase 5
+  // marine module switch flips with the marine vertical at phase 5.
+  // NOTE: tourism is deliberately NOT in any phase — the spec vision lists it
+  // but the phase plan doesn't schedule it, so it stays OFF until an admin
+  // activates it through FAMS (the no-code-change activation promise).
 };
 
 /** Seed the engine: global defaults at the given phase + spec demo rules. */

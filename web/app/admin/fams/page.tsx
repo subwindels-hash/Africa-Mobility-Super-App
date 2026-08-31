@@ -31,7 +31,7 @@ export default function FamsAdminPage() {
     >
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         <StatCard label="Active phase" value="Phase 4 / 5" sub="marine unlocks at Phase 5" />
-        <StatCard label="Global switches" value="24 / 24" sub="22 on · marine + yacht class off" />
+        <StatCard label="Global switches" value="25 / 25" sub="23 on · marine + tourism off" />
         <StatCard label="Activation rules" value="41" delta="+6 today" sub="every change logged" />
         <StatCard label="Emergency stops" value="0" sub="11 kill domains armed" />
         <StatCard label="Blocked requests (24h)" value="128" sub="canonical message served" />
@@ -69,6 +69,7 @@ export default function FamsAdminPage() {
                 ['📹 Video calls', ON('v'), 'WebRTC'],
                 ['📞 Voice calls', ON('vc'), 'WebRTC + PSTN fallback'],
                 ['💬 Chat system', ON('ch'), 'in-app + in-ride'],
+                ['🖼 Tourism services', OFF('tou', 'awaiting activation'), 'built — one switch to launch'],
               ]}
             />
           </div>

@@ -78,10 +78,10 @@ function unavailableText(vertical: string, d: FamsDecision, ctx: FamsContext): s
 
 export interface InboundMessage {
   from: string;                        // WhatsApp phone (msisdn)
-  type: 'text' | 'location' | 'audio' | 'image' | 'button' | 'interactive';
+  type: 'text' | 'location' | 'audio' | 'image' | 'document' | 'button' | 'interactive';
   text?: string;
   location?: { lat: number; lng: number; label?: string };
-  mediaId?: string;                    // voice note / image → media pipeline
+  mediaId?: string;                    // voice note / image / document → media pipeline
   button?: string;
   timestamp: string;
 }
@@ -116,10 +116,12 @@ export function getSession(phone: string): WaSession {
 export interface MediaPipeline {
   transcribe(mediaId: string, lang?: WaLanguage): Promise<string>;
   extractFromImage(mediaId: string): Promise<{ ocrText: string; locations: { lat?: number; lng?: number; raw: string; source: 'image' }[] }>;
+  extractFromDocument(mediaId: string): Promise<{ ocrText: string; docKind?: string }>;
 }
 export const mediaPipeline: MediaPipeline = {
   async transcribe(mediaId: string) { return `[voice:${mediaId}]`; },
   async extractFromImage(mediaId: string) { return { ocrText: '', locations: [] }; },
+  async extractFromDocument(mediaId: string) { return { ocrText: '' }; },
 };
 export function setMediaPipeline(p: MediaPipeline) { Object.assign(mediaPipeline, p); }
 
@@ -174,6 +176,17 @@ async function routeInbound(msg: InboundMessage): Promise<OutboundMessage> {
     }
     const nlu = classifyTranscript(ocrText || 'address', 'image', { locations });
     return route(msg.from, session, nlu, ocrText || locations.map((l) => l.raw).join(' to '));
+  }
+
+  // documents (PDF booking refs, invoices, visa papers) → OCR → intent
+  if (msg.type === 'document' && msg.mediaId) {
+    const { ocrText, docKind } = await mediaPipeline.extractFromDocument(msg.mediaId);
+    session.history.push({ role: 'customer', text: `📄 document${docKind ? ` (${docKind})` : ''}: ${msg.mediaId}`, at: msg.timestamp });
+    if (!ocrText.trim()) {
+      return { to: msg.from, text: '📄 I got your document. Tell me briefly what you need — e.g. *"book a tour package"*, *"check my booking BKG-12345"* or *"process this visa letter"* — and I\'ll take it from there.', meta: { node: session.node } };
+    }
+    const nlu = classifyTranscript(ocrText, 'document');
+    return route(msg.from, session, nlu, ocrText);
   }
 
   const text = msg.text ?? msg.button ?? '';
