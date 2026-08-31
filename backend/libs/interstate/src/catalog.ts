@@ -168,9 +168,10 @@ export interface CargoDescriptor {
 
 /** Vehicles that can legally/physically carry this cargo — smallest sufficient first. */
 export function eligibleVehicles(cargo: CargoDescriptor, service: ServiceSpec): FreightVehicleSpec[] {
+  const categories = cargo.categories?.length ? cargo.categories : ['general']; // callers may omit → general cargo
   return FREIGHT_VEHICLES
     .filter((v) => v.capacityKg >= cargo.weightKg)
-    .filter((v) => cargo.categories.some((c) => v.cargoSupport.includes(c)))
+    .filter((v) => categories.some((c) => v.cargoSupport.includes(c)))
     .filter((v) => !service.requiresReefer || v.refrigerated === true)
     .sort((a, b) => a.capacityKg - b.capacityKg);
 }

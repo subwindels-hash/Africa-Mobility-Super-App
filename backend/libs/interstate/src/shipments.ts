@@ -221,6 +221,8 @@ export class InterstateMarketplace {
 
   /** § booking: quote_request + compare_providers — AI recommends best provider. */
   requestQuote(req: QuoteRequest, ctx: { originState: string }): QuoteResult {
+    // Callers (API, WhatsApp bridge) may omit categories — default to general cargo once, here.
+    req = { ...req, cargo: { ...req.cargo, categories: req.cargo.categories?.length ? req.cargo.categories : ['general'] } };
     const spec = SERVICES.find((s) => s.code === req.service)!;
     const vehicle = bestVehicle(req.cargo, spec);
     if (!vehicle) throw new Error(`No eligible vehicle for cargo ${req.cargo.categories.join('/')} ${req.cargo.weightKg}kg`);

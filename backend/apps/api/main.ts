@@ -817,7 +817,11 @@ app.post('/v1/interstate/quote', (req, res) => {
       option: b.option, urgency: b.urgency, routeSecurityRisk: b.routeSecurityRisk,
     }, ilstCtx(b));
     res.json(q);
-  } catch (e: any) { return problem(res, 403, 'FEATURE_DISABLED', e.message); }
+  } catch (e: any) {
+    // FAMS gate rejections surface as 403 FEATURE_DISABLED; anything else is OUR bug — 500, honestly.
+    const gate = typeof e?.message === 'string' && /disabled|not (yet )?available|gated/i.test(e.message);
+    return problem(res, gate ? 403 : 500, gate ? 'FEATURE_DISABLED' : 'INTERNAL_ERROR', e.message);
+  }
 });
 
 app.post('/v1/interstate/recommend', (req, res) => {

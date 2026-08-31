@@ -1,7 +1,7 @@
 {
   "name": "amsa-backend",
   "version": "1.0.0",
-  "description": "Africa Mobility Super App — NestJS backend monorepo (modular monolith with microservice extraction path)",
+  "description": "Africa Mobility Super App \u2014 NestJS backend monorepo (modular monolith with microservice extraction path)",
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
@@ -11,7 +11,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint . --ext .ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "RUN_E2E=1 vitest run tests/e2e",
+    "load": "node ../scripts/load/api-load.mjs"
   },
   "dependencies": {
     "express": "^4.21.2"
