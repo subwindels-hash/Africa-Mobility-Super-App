@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { FamsEngine, seedFams, UNAVAILABLE_MESSAGE } from '../libs/fams/src/index';
+import {
+  FamsEngine, seedFams, UNAVAILABLE_MESSAGE, PLATFORM_MODULES, USER_GROUPS, ASSET_TYPES,
+  VENDOR_STATES, VENDOR_STATE_VALUE,
+} from '../libs/fams/src/index';
 
 function engine(phase = 4) {
   const e = new FamsEngine();
@@ -171,7 +174,7 @@ describe('FAMS — scheduled activations (scheduler tick)', () => {
 
 describe('FAMS — spec message & availability matrix', () => {
   it('exports the canonical unavailable message', () => {
-    expect(UNAVAILABLE_MESSAGE).toBe('Service currently unavailable in your location.');
+    expect(UNAVAILABLE_MESSAGE).toBe('Service is currently unavailable in your location.');
   });
 
   it('availability matrix covers all verticals for the dashboard', () => {
@@ -180,5 +183,90 @@ describe('FAMS — spec message & availability matrix', () => {
     expect(Object.keys(m)).toHaveLength(8);
     expect(m.transportation.available).toBe(true);
     expect(m.marine.available).toBe(false);
+  });
+});
+
+describe('FAMS — spec v2 expansion (24 global switches, categories, groups, assets)', () => {
+  it('catalogs all 24 spec global switches (25 codes: taxi aliases rides)', () => {
+    expect(PLATFORM_MODULES).toContain('taxi');
+    expect(PLATFORM_MODULES).toContain('dispatch');
+    expect(PLATFORM_MODULES).toContain('delivery');
+    expect(PLATFORM_MODULES).toContain('accommodation');
+    expect(PLATFORM_MODULES).toContain('voice_calls');
+    expect(PLATFORM_MODULES).toContain('chat');
+    expect(PLATFORM_MODULES).toContain('video_calls');
+    expect(PLATFORM_MODULES).toContain('ai_features');
+    expect(PLATFORM_MODULES.length).toBeGreaterThanOrEqual(24);
+  });
+
+  it('spec phases: phase 1 disables aviation/marine/security/hotels, phase 5 enables marine', () => {
+    const p1 = engine(1);
+    expect(p1.verticalAvailable('marine', NG)).toBe(false);
+    expect(p1.verticalAvailable('aviation', NG)).toBe(false);
+    expect(p1.evaluate('module', 'dispatch', NG).available).toBe(true); // dispatch on from phase 1
+    const p5 = engine(5);
+    expect(p5.verticalAvailable('marine', NG)).toBe(true);
+    expect(p5.evaluate('module', 'chat', NG).available).toBe(true);
+  });
+
+  it('dispatch / travel / security categories have independent switches', () => {
+    const e = engine(4);
+    // dispatch categories inherit logistics (on)…
+    expect(e.evaluate('category', 'dispatch.bike', NG).available).toBe(true);
+    // …until an admin flips one off
+    e.upsertRule({ level: 'category', target: { kind: 'category', code: 'dispatch.courier' }, value: 'off', note: 'courier partner paused' });
+    expect(e.evaluate('category', 'dispatch.courier', NG).available).toBe(false);
+    expect(e.evaluate('category', 'dispatch.bike', NG).available).toBe(true); // sibling unaffected
+    // travel + security category families resolve
+    expect(e.evaluate('category', 'travel.domestic', NG).available).toBe(true);
+    expect(e.evaluate('category', 'security.event', NG).available).toBe(true);
+  });
+
+  it('spec state/city examples: Edo travel off, Benin City security off, Asaba aviation off', () => {
+    const e = engine(4);
+    const benin = { country: 'NG', state: 'NG-ED', city: 'NG-BNI', userGroups: ['customers'] };
+    expect(e.verticalAvailable('transportation', benin)).toBe(true);  // taxi ON
+    expect(e.verticalAvailable('hotels', benin)).toBe(true);          // hotels ON
+    expect(e.verticalAvailable('security', benin)).toBe(false);       // security OFF (city)
+    expect(e.verticalAvailable('travel', benin)).toBe(false);         // travel OFF (state)
+    expect(e.verticalAvailable('aviation', benin)).toBe(false);       // aviation OFF (state)
+    const asaba = { country: 'NG', state: 'NG-DE', city: 'NG-ASB', userGroups: ['customers'] };
+    expect(e.verticalAvailable('aviation', asaba)).toBe(false);
+  });
+
+  it('vendor lifecycle: 5 spec states map to engine values (disabled blocks hard)', () => {
+    expect([...VENDOR_STATES]).toEqual(['active', 'suspended', 'pending_review', 'maintenance', 'disabled']);
+    expect(VENDOR_STATE_VALUE.disabled).toBe('off');
+    expect(VENDOR_STATE_VALUE.pending_review).toBe('hidden');
+    const e = engine(4);
+    e.upsertRule({ level: 'vendor', selector: 'vnd_x', target: { kind: 'vertical', code: 'transportation' }, value: VENDOR_STATE_VALUE.disabled, note: 'disabled by admin' });
+    expect(e.evaluate('vertical', 'transportation', { ...NG, vendorId: 'vnd_x' }).available).toBe(false);
+  });
+
+  it('asset catalog covers the 8 spec classes incl. dispatch bikes, charter aircraft, yachts', () => {
+    expect([...ASSET_TYPES]).toEqual(['car', 'motorcycle', 'dispatch_bike', 'helicopter', 'private_jet', 'charter_aircraft', 'boat', 'yacht']);
+    const e = engine(4);
+    e.upsertRule({ level: 'asset', selector: 'class:yacht', target: { kind: 'vertical', code: 'marine' }, value: 'off' });
+    expect(e.evaluate('vertical', 'marine', { ...NG, assetId: 'class:yacht' }).available).toBe(false);
+  });
+
+  it('user groups: 7 spec groups; corporate portal flag can be scoped to corporate clients', () => {
+    expect([...USER_GROUPS]).toEqual(['customers', 'drivers', 'riders', 'vendors', 'corporate', 'beta', 'vip']);
+    const e = engine(4);
+    e.upsertRule({ level: 'global', target: { kind: 'feature', code: 'portal.corp_pilot' }, value: 'off' });
+    e.upsertRule({ level: 'global', target: { kind: 'feature', code: 'portal.corp_pilot' }, value: 'on', userGroups: ['corporate'] });
+    expect(e.evaluate('feature', 'portal.corp_pilot', { country: 'NG', userGroups: ['customers'] }).available).toBe(false);
+    expect(e.evaluate('feature', 'portal.corp_pilot', { country: 'NG', userGroups: ['corporate'] }).available).toBe(true);
+  });
+
+  it('middleware pipeline trace: location → country → state → city → feature flag → vendor → booking', () => {
+    const e = engine(4);
+    const trace = e.evaluatePipeline('vertical', 'aviation', { country: 'NG', state: 'NG-ED', city: 'NG-BNI', userGroups: ['customers'] });
+    expect(trace.stages.map((s) => s.stage)).toEqual(['location', 'country', 'state', 'city', 'feature-flag', 'vendor', 'booking-engine']);
+    expect(trace.decision.available).toBe(false);
+    expect(trace.stages.at(-1)!.note).toBe(UNAVAILABLE_MESSAGE);
+    const state = trace.stages.find((s) => s.stage === 'state')!;
+    expect(state.value).toBe('off');
+    expect(state.note).toMatch(/Edo/i);
   });
 });

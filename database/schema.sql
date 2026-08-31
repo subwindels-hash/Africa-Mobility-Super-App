@@ -1695,12 +1695,12 @@ CREATE TABLE fams.feature_rollouts (             -- phased launch + user-group a
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE fams.vendor_activation (            -- Active/Suspended/Pending Review/Maintenance
+CREATE TABLE fams.vendor_activation (            -- Active/Suspended/Pending Review/Maintenance/Disabled
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   vendor_id UUID NOT NULL REFERENCES vendor.vendors(id),
   vendor_code TEXT UNIQUE NOT NULL,              -- vnd_a, vnd_b (engine key)
   state TEXT NOT NULL DEFAULT 'pending_review'
-    CHECK (state IN ('active','suspended','pending_review','maintenance')),
+    CHECK (state IN ('active','suspended','pending_review','maintenance','disabled')),
   reason TEXT,
   countries TEXT[] NOT NULL DEFAULT '{}',
   scheduled_resume_at TIMESTAMPTZ,
@@ -1710,10 +1710,10 @@ CREATE TABLE fams.vendor_activation (            -- Active/Suspended/Pending Rev
 );
 CREATE INDEX idx_fams_vendor_state ON fams.vendor_activation(state);
 
-CREATE TABLE fams.asset_activation (             -- vehicle/motorcycle/helicopter/jet/boat
+CREATE TABLE fams.asset_activation (             -- car/motorcycle/dispatch_bike/helicopter/private_jet/charter_aircraft/boat/yacht
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   asset_code TEXT UNIQUE NOT NULL,               -- ast_jet_b, or class 'helicopter'
-  asset_type TEXT NOT NULL CHECK (asset_type IN ('vehicle','motorcycle','helicopter','jet','boat')),
+  asset_type TEXT NOT NULL CHECK (asset_type IN ('car','vehicle','motorcycle','dispatch_bike','helicopter','private_jet','jet','charter_aircraft','boat','yacht')),
   asset_id UUID,
   service_code TEXT REFERENCES fams.services(code),
   value TEXT NOT NULL DEFAULT 'on' CHECK (value IN ('on','off','hidden','maintenance','beta')),
@@ -1761,6 +1761,87 @@ CREATE TABLE fams.audit_log (                    -- every activation change, tra
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_fams_audit_target ON fams.audit_log(target, created_at DESC);
+
+CREATE TABLE fams.country_services (             -- spec table: country-level activation
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  country_code CHAR(2) NOT NULL REFERENCES geo.countries(code),
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  value TEXT NOT NULL CHECK (value IN ('on','off','hidden','maintenance','beta')),
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMPTZ,
+  note TEXT,
+  updated_by UUID,
+  version BIGINT NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (country_code, service_code)
+);
+CREATE INDEX idx_fams_country_svc ON fams.country_services(country_code, service_code);
+
+CREATE TABLE fams.state_services (               -- spec table: state/province activation
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  state_code TEXT NOT NULL REFERENCES fams.states(code),
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  value TEXT NOT NULL CHECK (value IN ('on','off','hidden','maintenance','beta')),
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMPTZ,
+  note TEXT,
+  updated_by UUID,
+  version BIGINT NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (state_code, service_code)
+);
+CREATE INDEX idx_fams_state_svc ON fams.state_services(state_code, service_code);
+
+CREATE TABLE fams.city_services (                -- spec table: city-level activation (+ optional fence)
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  city_code TEXT NOT NULL REFERENCES geo.cities(code),
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  value TEXT NOT NULL CHECK (value IN ('on','off','hidden','maintenance','beta')),
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMPTZ,
+  geofence JSONB,                                -- {"lat":6.5774,"lng":3.3212,"radiusM":15000}
+  note TEXT,
+  updated_by UUID,
+  version BIGINT NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (city_code, service_code)
+);
+CREATE INDEX idx_fams_city_svc ON fams.city_services(city_code, service_code);
+
+CREATE TABLE fams.activation_logs (              -- spec table: full activation change history
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  actor_id UUID NOT NULL,
+  actor_role TEXT NOT NULL,                      -- super_admin | admin | scheduler | system
+  action TEXT NOT NULL,                          -- activate | deactivate | hide | maintenance | schedule | emergency_stop | rollout
+  scope TEXT NOT NULL,                           -- global | country | state | city | category | vendor | asset | user_group
+  selector TEXT,                                 -- NG | NG-ED | NG-BNI | ride.vip | vnd_a | ast_jet_b | beta
+  service_code TEXT NOT NULL REFERENCES fams.services(code),
+  before_value TEXT,
+  after_value TEXT,
+  reason TEXT,
+  request_ip INET,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fams_act_logs_service ON fams.activation_logs(service_code, created_at DESC);
+CREATE INDEX idx_fams_act_logs_actor ON fams.activation_logs(actor_id, created_at DESC);
+
+-- Activation analytics (10th dashboard module): coverage per service
+CREATE OR REPLACE VIEW fams.v_activation_analytics AS
+SELECT s.code AS service_code, s.name AS service_name, s.kind,
+       COALESCE(cs.active_countries, 0) AS countries_on,
+       COALESCE(ss.active_states, 0) AS states_on,
+       COALESCE(cis.active_cities, 0) AS cities_on,
+       EXISTS (SELECT 1 FROM fams.emergency_stops es
+               WHERE es.target_key IN (s.code, 'module:' || split_part(s.code, '.', 1))
+                 AND es.cleared_at IS NULL) AS emergency_stopped
+FROM fams.services s
+LEFT JOIN (SELECT service_code, COUNT(*) AS active_countries FROM fams.country_services WHERE value IN ('on','beta') GROUP BY service_code) cs ON cs.service_code = s.code
+LEFT JOIN (SELECT service_code, COUNT(*) AS active_states FROM fams.state_services WHERE value IN ('on','beta') GROUP BY service_code) ss ON ss.service_code = s.code
+LEFT JOIN (SELECT service_code, COUNT(*) AS active_cities FROM fams.city_services WHERE value IN ('on','beta') GROUP BY service_code) cis ON cis.service_code = s.code
+ORDER BY s.kind, s.sort_order;
 
 -- ============================================================================
 -- ROW-LEVEL SECURITY EXAMPLE (multi-tenant isolation for future split)

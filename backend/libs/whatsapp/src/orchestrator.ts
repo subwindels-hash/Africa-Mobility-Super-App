@@ -140,6 +140,12 @@ async function routeInbound(msg: InboundMessage): Promise<OutboundMessage> {
     return { to: msg.from, text: '🧑🏾‍💻 You\'re with a live agent — they\'ll reply here shortly.', meta: { node: 'escalated', escalated: true } };
   }
 
+  // FAMS master switch: the whole WhatsApp AI assistant is itself a feature.
+  // If module whatsapp_ai is killed, only the canonical message goes out.
+  if (!fams.evaluate('module', 'whatsapp_ai', famsContextFor(msg.from)).available) {
+    return { to: msg.from, text: UNAVAILABLE_MESSAGE, meta: { node: 'greeting', fams: 'blocked', reason: 'WhatsApp AI assistant deactivated by admin' } };
+  }
+
   // location payloads slot-fill directly
   if (msg.type === 'location' && msg.location) {
     const d = session.draft;

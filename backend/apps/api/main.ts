@@ -19,17 +19,19 @@
  * FAMS — Feature Activation Management System (docs/28), no deploy needed:
  *   GET/POST /v1/feature-flags · PUT/DELETE /v1/feature-flags/:id
  *   GET/POST /v1/service-availability · PUT /v1/service-availability/:id
+ *   GET/POST /v1/fams/vendors · /v1/fams/assets (vendor & asset activation)
  *   GET/POST /v1/fams/emergency      (kill switch)
  *   GET/POST /v1/fams/schedules · POST /v1/fams/tick (time-based activation)
- *   GET  /v1/fams/rules · /v1/fams/health
- *   → Feature Activation Middleware guards /v1/bookings* (403 + canonical message)
+ *   GET  /v1/fams/rules · /v1/fams/locations · /v1/fams/analytics · /v1/fams/health
+ *   → Feature Activation Middleware guards /v1/bookings* (403 + canonical message,
+ *     full pipeline trace: location→country→state→city→flag→vendor→booking)
  */
 import express, { type Request, type Response, type NextFunction } from 'express';
 import * as core from '../../libs/core/src/index';
 import * as wa from '../../libs/whatsapp/src/index';
 import {
   FamsEngine, type FamsRule, type FamsValue, type FamsLevel, type FamsContext, type FamsTargetKind,
-  PLATFORM_MODULES, VERTICAL_MODULE, CATEGORY_VERTICAL, PHASES,
+  PLATFORM_MODULES, VERTICAL_MODULE, CATEGORY_VERTICAL, PHASES, ASSET_TYPES, VENDOR_STATE_VALUE,
   CITY_STATE, STATE_NAMES, countryFromPhone, UNAVAILABLE_MESSAGE, ensureSeeded,
 } from '../../libs/fams/src/index';
 
@@ -73,17 +75,22 @@ function famsCtxFrom(src: Record<string, any>): FamsContext {
 }
 
 /**
- * Feature Activation Middleware — wraps the booking engine. When the engine
- * says OFF the caller gets the canonical message and a 403 — before pricing,
- * dispatch or escrow.
+ * Feature Activation Middleware — wraps the booking engine per the spec
+ * workflow: User Request → Location Validation → Country → State → City →
+ * Feature Flag → Vendor → Booking Engine. When the final decision is OFF the
+ * caller gets the canonical message and a 403 — before pricing, dispatch or
+ * escrow. The full stage trace is attached for ops.
  */
+const famsOps = { evaluations: 0, blocked: 0 };
 const famsMiddleware = (vertical = 'transportation') => (req: Request, res: Response, next: NextFunction) => {
   const ctx = famsCtxFrom(req.body ?? {});
-  const decision = fams.evaluate('vertical', vertical, ctx);
+  famsOps.evaluations++;
+  const { decision, stages } = fams.evaluatePipeline('vertical', vertical, ctx);
   if (!decision.available) {
-    return problem(res, 403, 'SERVICE_UNAVAILABLE', UNAVAILABLE_MESSAGE, { service: vertical, context: ctx, decision });
+    famsOps.blocked++;
+    return problem(res, 403, 'SERVICE_UNAVAILABLE', UNAVAILABLE_MESSAGE, { service: vertical, context: ctx, decision, pipeline: stages });
   }
-  (req as any).fams = { decision, ctx };
+  (req as any).fams = { decision, ctx, pipeline: stages };
   next();
 };
 app.use(['/v1/bookings', '/v1/bookings/estimate'], famsMiddleware('transportation'));
@@ -358,6 +365,78 @@ app.post('/v1/fams/schedules', auth, (req: any, res) => {
 app.post('/v1/fams/tick', (_req, res) => {
   const applied = fams.tick();
   res.json({ applied: applied.length, schedules: applied });
+});
+
+/** Vendor activation — spec lifecycle: active/suspended/pending_review/maintenance/disabled. */
+app.get('/v1/fams/vendors', (_req, res) => {
+  const rules = fams.listRules().filter((r) => r.level === 'vendor');
+  const VALUE_STATE = { on: 'active', off: 'suspended', hidden: 'pending_review', maintenance: 'maintenance', beta: 'beta' } as const;
+  res.json({
+    vendors: rules.map((r) => ({
+      vendorId: r.selector, vertical: r.target.code,
+      state: r.value === 'off' && /disabled/i.test(r.note ?? '') ? 'disabled' : VALUE_STATE[r.value] ?? r.value,
+      value: r.value, note: r.note, ruleId: r.id, updatedAt: r.updatedAt,
+    })),
+  });
+});
+
+app.post('/v1/fams/vendors', auth, (req: any, res) => {
+  const { vendorId, state, reason } = req.body ?? {};
+  if (!vendorId || !state) return problem(res, 422, 'VALIDATION_FAILED', 'vendorId and state required');
+  const value = VENDOR_STATE_VALUE[state];
+  if (!value) return problem(res, 422, 'VALIDATION_FAILED', `state must be one of ${['active','suspended','pending_review','maintenance','disabled'].join('|')}`);
+  fams.upsertRule({ level: 'vendor', selector: String(vendorId), target: { kind: 'vertical', code: req.body?.vertical ?? 'transportation' }, value, note: reason ?? `vendor ${state}`, updatedBy: req.userId });
+  res.status(201).json({ vendorId, state, value, effect: fams.evaluate('vertical', req.body?.vertical ?? 'transportation', { country: 'NG', vendorId: String(vendorId), userGroups: ['customers'] }) });
+});
+
+/** Asset activation — spec classes: car/motorcycle/dispatch_bike/helicopter/private_jet/charter_aircraft/boat/yacht. */
+app.get('/v1/fams/assets', (_req, res) => {
+  res.json({
+    assetTypes: ASSET_TYPES,
+    assets: fams.listRules().filter((r) => r.level === 'asset').map((r) => ({ assetId: r.selector, vertical: r.target.code, value: r.value, note: r.note, ruleId: r.id })),
+  });
+});
+
+app.post('/v1/fams/assets', auth, (req: any, res) => {
+  const { assetId, value, vertical, note } = req.body ?? {};
+  if (!assetId || !value) return problem(res, 422, 'VALIDATION_FAILED', 'assetId and value required');
+  if (!['on', 'off', 'hidden', 'maintenance', 'beta'].includes(value)) return problem(res, 422, 'VALIDATION_FAILED', 'value must be on|off|hidden|maintenance|beta');
+  const rule = fams.upsertRule({ level: 'asset', selector: String(assetId), target: { kind: 'vertical', code: vertical ?? 'transportation' }, value, note, updatedBy: req.userId });
+  res.status(201).json({ rule });
+});
+
+/** Country / State / City Management — location-scoped rules for the dashboard. */
+app.get('/v1/fams/locations', (_req, res) => {
+  const rules = fams.listRules();
+  res.json({
+    countries: rules.filter((r) => r.level === 'country').map((r) => ({ country: r.selector, service: r.target.code, value: r.value, note: r.note, ruleId: r.id })),
+    states: rules.filter((r) => r.level === 'state').map((r) => ({ state: r.selector, service: r.target.code, value: r.value, note: r.note, ruleId: r.id })),
+    cities: rules.filter((r) => r.level === 'city').map((r) => ({ city: r.selector, service: r.target.code, value: r.value, note: r.note, ruleId: r.id })),
+    cityCatalog: Object.keys(CITY_STATE).map((c) => ({ code: c, state: CITY_STATE[c], stateName: STATE_NAMES[CITY_STATE[c]] })),
+  });
+});
+
+/** Activation Analytics — the 10th dashboard module. */
+app.get('/v1/fams/analytics', (_req, res) => {
+  const rules = fams.listRules();
+  const byLevel = rules.reduce<Record<string, number>>((acc, r) => { acc[r.level] = (acc[r.level] ?? 0) + 1; return acc; }, {});
+  const byValue = rules.reduce<Record<string, number>>((acc, r) => { acc[r.value] = (acc[r.value] ?? 0) + 1; return acc; }, {});
+  const cities = Object.keys(CITY_STATE);
+  const verticals = ['transportation', 'logistics', 'travel', 'aviation', 'security', 'accommodation', 'roadside', 'corporate_services'];
+  const coverage = cities.map((city) => ({
+    city,
+    state: CITY_STATE[city],
+    live: verticals.filter((v) => fams.verticalAvailable(v, { country: 'NG', state: CITY_STATE[city], city, userGroups: ['customers'] })).length,
+    of: verticals.length,
+  }));
+  res.json({
+    totals: { rules: rules.length, emergencies: fams.listEmergencies().length, schedules: fams.listSchedules().length, modules: PLATFORM_MODULES.length },
+    middleware: famsOps,
+    rulesByLevel: byLevel,
+    rulesByValue: byValue,
+    cityCoverage: coverage,
+    phase: PHASES,
+  });
 });
 
 app.get('/v1/fams/health', (_req, res) => res.json({ ok: true, rules: fams.listRules().length, emergencies: fams.listEmergencies().length, schedules: fams.listSchedules().length }));

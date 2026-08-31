@@ -73,11 +73,11 @@ const LEVEL_WEIGHT: Record<FamsLevel, number> = {
 const GROUP_BONUS = 15;
 
 export const CATEGORY_VERTICAL: Record<string, string> = {
-  ride: 'transportation', transfer: 'transportation', transport: 'transportation',
-  logistics: 'logistics',
-  flight: 'travel', travel: 'travel',
+  ride: 'transportation', transfer: 'transportation', transport: 'transportation', taxi: 'transportation',
+  logistics: 'logistics', dispatch: 'logistics', parcel: 'logistics', courier: 'logistics',
+  flight: 'travel', travel: 'travel', domestic: 'travel', international: 'travel',
   jet: 'aviation', heli: 'aviation', air: 'aviation', aviation: 'aviation',
-  marine: 'marine',
+  marine: 'marine', boat: 'marine',
   security: 'security',
   roadside: 'roadside',
   hotel: 'accommodation', apartment: 'accommodation', shortlet: 'accommodation', vacation: 'accommodation',
@@ -106,10 +106,23 @@ function distanceM(a: { lat: number; lng: number }, b: { lat: number; lng: numbe
 }
 
 export const PLATFORM_MODULES = [
-  'transportation', 'dispatch', 'logistics', 'delivery', 'travel', 'flights', 'hotels',
-  'aviation', 'marine', 'security_marketplace', 'corporate_services', 'wallet', 'escrow',
-  'whatsapp_ai', 'loyalty', 'subscriptions', 'promotions', 'roadside',
+  'transportation', 'taxi', 'dispatch', 'logistics', 'delivery', 'travel', 'flights', 'hotels',
+  'accommodation', 'roadside', 'security_marketplace', 'aviation', 'marine', 'corporate_services',
+  'wallet', 'escrow', 'loyalty', 'subscriptions', 'promotions', 'whatsapp_ai', 'ai_features',
+  'video_calls', 'voice_calls', 'chat',
 ] as const;
+
+/** Spec user groups — features can be scoped to any combination. */
+export const USER_GROUPS = ['customers', 'drivers', 'riders', 'vendors', 'corporate', 'beta', 'vip'] as const;
+
+/** Spec asset classes — each independently switchable (per class or per unit). */
+export const ASSET_TYPES = ['car', 'motorcycle', 'dispatch_bike', 'helicopter', 'private_jet', 'charter_aircraft', 'boat', 'yacht'] as const;
+
+/** Spec vendor lifecycle states → engine values. */
+export const VENDOR_STATES = ['active', 'suspended', 'pending_review', 'maintenance', 'disabled'] as const;
+export const VENDOR_STATE_VALUE: Record<string, FamsValue> = {
+  active: 'on', suspended: 'off', pending_review: 'hidden', maintenance: 'maintenance', disabled: 'off',
+};
 
 export const VERTICAL_MODULE: Record<string, string> = {
   transportation: 'transportation', logistics: 'logistics', travel: 'travel',
@@ -262,6 +275,63 @@ export class FamsEngine {
     for (const v of verticals) out[v] = this.evaluate('vertical', v, ctx);
     return out;
   }
+
+  /**
+   * Spec middleware workflow, as an inspectable trace:
+   *   User Request → Location Validation → Country → State → City →
+   *   Feature Flag → Vendor → Booking Engine
+   * Each stage reports the rule that governs it (deepest scope wins overall —
+   * a city-ON rule legitimately overrides a state-OFF rule; the trace shows
+   * every contribution so ops can see WHY a request was allowed or blocked).
+   */
+  evaluatePipeline(kind: FamsTargetKind, code: string, ctx: FamsContext): { stages: PipelineStage[]; decision: FamsDecision } {
+    const vertical = kind === 'category' ? verticalOfCategory(code) : kind === 'vertical' ? code : undefined;
+    const moduleCode = kind === 'module' ? code : vertical ? VERTICAL_MODULE[vertical] : undefined;
+    const matches = (r: FamsRule) =>
+      (r.target.kind === kind && r.target.code === code) ||
+      (vertical && r.target.kind === 'vertical' && r.target.code === vertical) ||
+      (moduleCode && r.target.kind === 'module' && r.target.code === moduleCode);
+
+    const byLevel = (level: FamsLevel) =>
+      [...this.rules.values()].filter((r) => matches(r) && r.level === level)
+        .sort((a, b) => (b._v ?? 0) - (a._v ?? 0))[0];
+
+    const stage = (name: string, level: FamsLevel | null, extra?: Partial<PipelineStage>): PipelineStage => {
+      if (!level) return { stage: name, checked: true, ruleId: null, ...extra };
+      const r = byLevel(level);
+      return {
+        stage: name, checked: true,
+        selector: r?.selector, ruleId: r?.id ?? null, value: r?.value,
+        note: r ? r.note ?? `${r.level}${r.selector ? `:${r.selector}` : ''} → ${r.value}` : `no ${level}-level rule — inherits`,
+        ...extra,
+      };
+    };
+
+    const decision = this.evaluate(kind, code, ctx);
+    const stages: PipelineStage[] = [
+      {
+        stage: 'location',
+        checked: true,
+        note: `resolved ${[ctx.city, ctx.state, ctx.country].filter(Boolean).join(' / ') || 'country unknown → platform default'}${ctx.location ? ` · geo ${ctx.location.lat.toFixed(4)},${ctx.location.lng.toFixed(4)}` : ''}`,
+      },
+      stage('country', 'country'),
+      stage('state', 'state'),
+      stage('city', 'city'),
+      stage('feature-flag', 'global', { note: byLevel('global') ? undefined : 'no global/module rule — platform default on' }),
+      ctx.vendorId ? stage('vendor', 'vendor') : { stage: 'vendor', checked: false, ruleId: null, note: 'no vendor on request' },
+      { stage: 'booking-engine', checked: decision.available, ruleId: decision.source, value: decision.value, note: decision.available ? 'allowed — proceed to booking engine' : UNAVAILABLE_MESSAGE },
+    ];
+    return { stages, decision };
+  }
 }
 
-export const UNAVAILABLE_MESSAGE = 'Service currently unavailable in your location.';
+export interface PipelineStage {
+  stage: string;                        // location | country | state | city | feature-flag | vendor | booking-engine
+  checked: boolean;
+  ruleId?: string | null;
+  selector?: string;
+  value?: FamsValue;
+  note?: string;
+}
+
+export const UNAVAILABLE_MESSAGE = 'Service is currently unavailable in your location.';

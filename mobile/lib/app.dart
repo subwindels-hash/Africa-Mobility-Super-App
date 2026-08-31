@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/theme/amsa_theme.dart';
+import 'core/fams/fams_availability.dart';
 
 class AmsaApp extends ConsumerWidget {
   const AmsaApp({super.key});
@@ -18,8 +19,24 @@ class AmsaApp extends ConsumerWidget {
 }
 
 /// Home shell with service launcher (wireframes C-03 in docs/13).
-class HomeShell extends StatelessWidget {
+///
+/// Since FAMS (docs/28) the launcher is activation-aware: tiles render only
+/// for verticals the Feature Activation Engine has switched ON for the user's
+/// context — admins change availability at runtime with no app release.
+class HomeShell extends ConsumerStatefulWidget {
   const HomeShell({super.key});
+
+  @override
+  ConsumerState<HomeShell> createState() => _HomeShellState();
+}
+
+class _HomeShellState extends ConsumerState<HomeShell> {
+  @override
+  void initState() {
+    super.initState();
+    // city comes from onboarding/geo in production; NG default for the demo
+    Future.microtask(() => ref.read(famsAvailabilityProvider.notifier).load(city: 'NG-LAG', country: 'NG'));
+  }
 
   static const _services = [
     ('Ride', '🚗', Color(0xFF17A558)),
@@ -67,7 +84,9 @@ class HomeShell extends StatelessWidget {
               mainAxisSpacing: 12,
               crossAxisSpacing: 12,
               children: [
-                for (final s in _services)
+                for (final s in activeServiceTiles(
+                  ref.watch(famsAvailabilityProvider).valueOrNull,
+                ))
                   Container(
                     decoration: BoxDecoration(
                       color: Colors.white,

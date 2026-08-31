@@ -188,6 +188,15 @@ const CLASSES: Record<string, string> = {
   economy: 'ride.economy', keke: 'ride.economy', standard: 'ride.standard', regular: 'ride.standard',
   premium: 'ride.premium', vip: 'ride.vip', luxury: 'ride.luxury', suv: 'ride.suv',
   chauffeur: 'ride.chauffeur', executive: 'ride.chauffeur', bus: 'transport.intercity',
+  // dispatch categories (FAMS category switches)
+  'dispatch bike': 'dispatch.bike', okada: 'dispatch.bike',
+  courier: 'dispatch.courier', parcel: 'dispatch.parcel', package: 'dispatch.parcel',
+  document: 'dispatch.document',
+  // travel categories
+  'domestic flight': 'travel.domestic', 'international flight': 'travel.international',
+  // security categories
+  'executive protection': 'security.exec_protection', 'vip escort': 'security.vip_escort',
+  'event security': 'security.event', 'corporate security': 'security.corporate',
 };
 
 export function extractEntities(text: string): NluEntities {
