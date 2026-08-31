@@ -7,7 +7,7 @@
 
 export type EventCategory =
   | 'auth' | 'api' | 'wallet' | 'escrow' | 'db' | 'infra' | 'network' | 'vendor'
-  | 'customer' | 'whatsapp' | 'devsecops';
+  | 'customer' | 'whatsapp' | 'devsecops' | 'vehicle';
 
 export type ThreatType =
   | 'unauthorized_access' | 'credential_abuse' | 'account_takeover' | 'bot_attack'
@@ -123,6 +123,15 @@ export class DetectionEngine {
     }
 
     // ── privilege escalation ──
+    // §13 vehicle cybersecurity — spoofing/theft/malicious-command signals raise immediately
+    if (e.category === 'vehicle' && e.riskHints?.some((h) =>
+      ['gps_spoofing','vehicle_theft','unauthorized_remote_access','malicious_command','sensor_manipulation','vehicle_identity_fraud','communication_attack','unauthorized_usage'].includes(h))) {
+      const spoof = e.riskHints.some((h) => ['gps_spoofing','sensor_manipulation'].includes(h));
+      raised.push(this.raise(spoof ? 'network_anomaly' : 'unauthorized_access', spoof ? 78 : 82, e, [
+        `vehicle security signal: ${e.riskHints.join(',')}`,
+      ]));
+    }
+
     if (e.riskHints?.includes('role_change') || /grant|escalate|admin.*create/i.test(e.action)) {
       if (e.riskHints?.includes('self_service') || e.riskHints?.includes('unapproved_role_change')) {
         raised.push(this.raise('privilege_escalation', 88, e, ['role elevation outside approval workflow']));

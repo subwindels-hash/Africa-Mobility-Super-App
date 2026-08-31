@@ -44,6 +44,7 @@ import * as core from '../../libs/core/src/index';
 import * as wa from '../../libs/whatsapp/src/index';
 import { shield } from '../../libs/shield/src/index';
 import { organism, TOTAL_AGENTS, LAYERS, fleetSummary, EXECUTIVE_CLUSTERS } from '../../libs/organism/src/index';
+import { MobilitySystem, COMMAND_AUTH_MODEL } from '../../libs/mobility/src/index';
 import {
   FamsEngine, type FamsRule, type FamsValue, type FamsLevel, type FamsContext, type FamsTargetKind,
   PLATFORM_MODULES, VERTICAL_MODULE, CATEGORY_VERTICAL, PHASES, ASSET_TYPES, VENDOR_STATE_VALUE,
@@ -585,6 +586,130 @@ app.get('/v1/organism/evolution', (_req, res) =>
   res.json({ adopted: organism.evolution.adopted, tunables: organism.tunables, history: organism.evolution.history() }));
 
 app.get('/v1/organism/graph', (_req, res) => res.json(organism.graph.stats()));
+
+// ─── AUTONOMOUS AI MOBILITY (docs/31) — integrated, not standalone ───────────
+// Vehicle tracking & intelligence, driver assistance, autonomy (FAMS-gated),
+// vehicle-aware routing, fleet intelligence, autonomous pipelines, safety and
+// vehicle cybersecurity — bridged into FAMS (docs/28), SHIELD (docs/29) and
+// the ORGANISM intelligence graph (docs/30).
+const mobility = new MobilitySystem(
+  { allows: (feature, ctx) => fams.evaluate('feature', feature, ctx as any).available },
+  {
+    reportVehicleSecurity: (e) => shield.ingestEvent({
+      category: 'vehicle', source: 'vehicle-telemetry', principal: e.principal ?? e.vehicleId,
+      action: `vehicle.${e.signal}`, outcome: 'denied', riskHints: e.riskHints ?? [e.signal],
+      meta: { evidence: e.evidence, vehicleId: e.vehicleId },
+    }),
+  },
+  { observe: (o) => organism.graph.observe({ ...o, ts: new Date() } as any) },
+);
+
+app.get('/v1/mobility/vehicles', (_req, res) => res.json({ vehicles: mobility.listVehicles() }));
+
+app.post('/v1/mobility/vehicles', (req, res) => {
+  const b = req.body ?? {};
+  if (!b.id || !b.cls) return problem(res, 422, 'VALIDATION_FAILED', 'id and cls required (car|taxi|suv|chauffeur|delivery_bike|motorcycle|truck|bus|autonomous_vehicle|aircraft|marine)');
+  const v = mobility.registerVehicle({
+    id: String(b.id), code: b.code ?? String(b.id), cls: b.cls, fleetId: b.fleetId, vendorId: b.vendorId,
+    autonomyLevel: Number(b.autonomyLevel ?? 0), modesSupported: b.modesSupported ?? ['manual'],
+    status: b.status ?? 'active', telematics: Boolean(b.telematics ?? true), healthScore: b.healthScore,
+  } as any);
+  res.status(201).json({ vehicle: v });
+});
+
+app.post('/v1/mobility/telemetry', (req, res) => {
+  const b = req.body ?? {};
+  if (!b.vehicleId || typeof b.lat !== 'number' || typeof b.lng !== 'number') return problem(res, 422, 'VALIDATION_FAILED', 'vehicleId, lat, lng required');
+  const out = mobility.ingestTelemetry({
+    vehicleId: String(b.vehicleId), ts: b.ts ? new Date(b.ts) : new Date(),
+    lat: b.lat, lng: b.lng, speedKph: b.speedKph ?? 0, headingDeg: b.headingDeg ?? 0,
+    routeId: b.routeId, destination: b.destination, driverStatus: b.driverStatus, vehicleStatus: b.vehicleStatus,
+    engineOn: b.engineOn, fuelOrBatteryPct: b.fuelOrBatteryPct, healthScore: b.healthScore, roadZone: b.roadZone, meta: b.meta,
+  });
+  if (out.gated) return problem(res, 403, 'SERVICE_UNAVAILABLE', UNAVAILABLE_MESSAGE, { feature: 'mob.tracking' });
+  res.status(201).json(out);
+});
+
+app.get('/v1/mobility/control-center', (_req, res) => res.json(mobility.controlCenter()));
+
+app.post('/v1/mobility/driver-assist', (req, res) => {
+  const b = req.body ?? {};
+  res.json({ messages: mobility.advise(b) });
+});
+
+app.post('/v1/mobility/autonomy/mode', (req, res) => {
+  const b = req.body ?? {};
+  const vehicle = mobility.tracker.get(String(b.vehicleId));
+  if (!vehicle) return problem(res, 404, 'NOT_FOUND', 'Vehicle not registered');
+  const mode = b.mode;
+  if (!['manual', 'ai_assisted', 'supervised_autonomous', 'full_autonomous'].includes(mode)) {
+    return problem(res, 422, 'VALIDATION_FAILED', 'mode must be manual|ai_assisted|supervised_autonomous|full_autonomous');
+  }
+  const sensors = (Array.isArray(b.sensors) ? b.sensors : []).map((r: any) => ({
+    source: r.source, agreesWithPosition: r.agreesWithPosition,
+    objects: r.objects ?? (r.objectType !== undefined && r.confidence !== undefined ? { [r.objectType]: r.confidence } : {}),
+  }));
+  const env = mobility.understand(sensors);
+  const out = mobility.requestMode(vehicle, mode, env, {
+    country: b.country ?? 'NG', state: b.state, city: b.city, roadZone: b.roadZone,
+    fleetId: vehicle.fleetId, vehicleId: vehicle.id, vendorId: vehicle.vendorId, userGroups: ['vendors'],
+  }, Boolean(b.legalApproval));
+  res.json({ requested: mode, ...out, environment: env });
+});
+
+app.post('/v1/mobility/route', (req, res) => {
+  const b = req.body ?? {};
+  const vehicle = mobility.tracker.get(String(b.vehicleId));
+  if (!vehicle) return problem(res, 404, 'NOT_FOUND', 'Vehicle not registered');
+  if (!Array.isArray(b.candidates)) return problem(res, 422, 'VALIDATION_FAILED', 'candidates[] required');
+  res.json({ options: mobility.route({
+    distanceKm: b.distanceKm ?? 10, traffic: b.traffic ?? 'moderate', roadQuality: b.roadQuality ?? 'good',
+    weather: b.weather ?? 'clear', closures: b.closures, securityRisk: b.securityRisk,
+    vehicle, load: b.load, requirement: b.requirement,
+  }, b.candidates) });
+});
+
+app.post('/v1/mobility/fleet/:fleetId/intelligence', (req, res) => {
+  const stats = (req.body?.stats ?? []).map((s: any) => ({ ...s, vehicle: mobility.tracker.get(s.vehicleId) }).vehicle ? { ...s, vehicle: mobility.tracker.get(s.vehicleId)! } : null).filter(Boolean);
+  res.json(mobility.fleetAnalysis(stats));
+});
+
+app.post('/v1/mobility/delivery/autonomous', (req, res) => {
+  const b = req.body ?? {};
+  const allowed = fams.evaluate('feature', 'mob.autonomous_delivery', { country: b.country ?? 'NG', city: b.city, roadZone: b.roadZone, userGroups: ['customers'] }).available;
+  res.json(mobility.deliveryPlan({
+    allowed, vehicleAssigned: b.vehicleAssigned ?? true, routeFound: b.routeFound ?? true,
+    autonomous: b.autonomous ?? true, tracked: true, confirmed: b.confirmed ?? true,
+  }));
+});
+
+app.post('/v1/mobility/ride/autonomous', (req, res) => {
+  const b = req.body ?? {};
+  const allowed = fams.evaluate('feature', 'mob.self_driving', { country: b.country ?? 'NG', city: b.city, roadZone: b.roadZone, userGroups: ['customers'] }).available;
+  res.json(mobility.ridePlan({
+    matched: b.matched ?? true, avAssigned: b.avAssigned ?? true, allowed,
+    pickup: b.pickup ?? true, trip: b.trip ?? true, arrived: b.arrived ?? true, paid: b.paid ?? true,
+  }));
+});
+
+app.post('/v1/mobility/safety', (req, res) => {
+  const b = req.body ?? {};
+  if (!['collision_risk', 'dangerous_road', 'vehicle_failure', 'driver_emergency', 'passenger_emergency', 'unusual_movement'].includes(b.type)) {
+    return problem(res, 422, 'VALIDATION_FAILED', 'type required (collision_risk|dangerous_road|vehicle_failure|driver_emergency|passenger_emergency|unusual_movement)');
+  }
+  const response = mobility.safetyResponse(b.type, { severity: b.severity ?? 0.5, immobilizeSupported: Boolean(b.immobilizeSupported), legallyPermitted: Boolean(b.legallyPermitted) });
+  if (response.workflow === 'emergency_workflow' || response.escalateToHumans) {
+    shield.ingestEvent({ category: 'vehicle', source: 'safety-system', principal: b.vehicleId, action: `safety.${b.type}`, outcome: 'denied', riskHints: ['emergency'] });
+  }
+  res.status(201).json({ type: b.type, response });
+});
+
+app.post('/v1/mobility/vehicle-command', (req, res) => {
+  const b = req.body ?? {};
+  const signal = mobility.checkVehicleCommand({ command: b.command, principal: b.principal, authorizedPrincipals: b.authorizedPrincipals, sensorContradiction: b.sensorContradiction, vinMatch: b.vinMatch, remoteAccess: b.remoteAccess });
+  if (signal) return problem(res, 403, 'VEHICLE_SECURITY_BLOCK', `Command rejected — ${signal}`, { signal, authModel: COMMAND_AUTH_MODEL });
+  res.json({ accepted: true, authModel: COMMAND_AUTH_MODEL });
+});
 
 // ─── WhatsApp Smart AI Customer Service Platform (docs/26) ──────────────────
 app.get('/webhooks/whatsapp', wa.verifyWebhook);

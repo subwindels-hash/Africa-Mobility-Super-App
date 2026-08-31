@@ -17,7 +17,7 @@
  */
 
 export type FamsValue = 'on' | 'off' | 'hidden' | 'maintenance' | 'beta';
-export type FamsLevel = 'global' | 'country' | 'state' | 'city' | 'category' | 'vendor' | 'asset';
+export type FamsLevel = 'global' | 'country' | 'state' | 'city' | 'road_zone' | 'category' | 'vendor' | 'fleet' | 'vehicle' | 'asset';
 export type FamsTargetKind = 'module' | 'vertical' | 'category' | 'feature';
 
 export interface FamsRule {
@@ -52,8 +52,8 @@ export interface ScheduledActivation {
 }
 
 export interface FamsContext {
-  country?: string; state?: string; city?: string;
-  vendorId?: string; assetId?: string;
+  country?: string; state?: string; city?: string; roadZone?: string;
+  vendorId?: string; fleetId?: string; vehicleId?: string; assetId?: string;
   userGroups?: string[];
   userId?: string;
   location?: { lat: number; lng: number };
@@ -68,7 +68,7 @@ export interface FamsDecision {
 }
 
 const LEVEL_WEIGHT: Record<FamsLevel, number> = {
-  asset: 70, vendor: 60, category: 50, city: 40, state: 30, country: 20, global: 10,
+  asset: 70, vehicle: 75, fleet: 65, vendor: 60, category: 50, road_zone: 45, city: 40, state: 30, country: 20, global: 10,
 };
 const GROUP_BONUS = 15;
 
@@ -111,6 +111,8 @@ export const PLATFORM_MODULES = [
   'accommodation', 'roadside', 'security_marketplace', 'aviation', 'marine', 'corporate_services',
   'wallet', 'escrow', 'loyalty', 'subscriptions', 'promotions', 'whatsapp_ai', 'ai_features',
   'video_calls', 'voice_calls', 'chat', 'tourism',
+  // autonomous mobility (docs/31) — tracking live, autonomy OFF by default
+  'vehicle_tracking', 'driver_assistance', 'self_driving', 'autonomous_delivery',
 ] as const;
 
 /** Spec user groups — features can be scoped to any combination. */
@@ -215,7 +217,10 @@ export class FamsEngine {
       if (r.level === 'country' && r.selector !== ctx.country) continue;
       if (r.level === 'state' && r.selector !== ctx.state) continue;
       if (r.level === 'city' && r.selector !== ctx.city) continue;
+      if (r.level === 'road_zone' && r.selector !== ctx.roadZone) continue;
       if (r.level === 'vendor' && r.selector !== ctx.vendorId) continue;
+      if (r.level === 'fleet' && r.selector !== ctx.fleetId) continue;
+      if (r.level === 'vehicle' && r.selector !== ctx.vehicleId) continue;
       if (r.level === 'asset' && r.selector !== ctx.assetId) continue;
 
       // time semantics

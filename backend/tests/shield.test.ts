@@ -53,6 +53,17 @@ const AGENT_TAXONOMIES = {
     && AGENT_TAXONOMY.data_intelligence.capabilities.includes('revenue optimization')),
 };
 
+describe('SHIELD — vehicle cybersecurity (§13 mobility integration)', () => {
+  it('gps spoofing and malicious vehicle commands raise immediate threats', () => {
+    const t1 = swarm().ingestEvent({ category: 'vehicle', source: 'vehicle-telemetry', principal: 'veh_x', action: 'vehicle.gps_spoofing', outcome: 'denied', riskHints: ['gps_spoofing'] });
+    expect(t1.threats.length).toBeGreaterThan(0);
+    expect(t1.threats[0].type).toBe('network_anomaly');
+    const t2 = swarm().ingestEvent({ category: 'vehicle', source: 'vehicle-command', principal: 'attacker', action: 'vehicle.disable_brakes', outcome: 'denied', riskHints: ['malicious_command'] });
+    expect(t2.threats[0].type).toBe('unauthorized_access');
+    expect(t2.threats[0].severity).toBe('high');
+  });
+});
+
 describe('SHIELD — real-time threat detection', () => {
   it('credential abuse: 5+ failed auths in the window raises a threat', () => {
     const s = swarm();

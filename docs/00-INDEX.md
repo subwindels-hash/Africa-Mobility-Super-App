@@ -86,6 +86,7 @@ AMSA is a multi-vertical technology marketplace combining Transportation, Logist
 | 63 | FAMS — Feature Activation Management System (activation control plane, spec v2) | `28-fams.md` |
 | 64 | SHIELD — Autonomous Cybersecurity, Threat Intelligence & Platform Defense Swarm | `29-shield.md` |
 | 65 | ORGANISM — Global AI Organism Architecture (8 layers, 120,000+ agents) | `30-organism.md` |
+| 66 | Autonomous AI Mobility, Vehicle Intelligence & Self-Driving System | `31-autonomous-mobility.md` |
 
 ## Platform Apps & Brands
 

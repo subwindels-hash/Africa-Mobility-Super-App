@@ -99,6 +99,17 @@ export function seedFams(engine: FamsEngine, activePhase = 4): void {
     endsAt: new Date('2027-01-31T23:59:00Z'), note: 'Seasonal promo auto-expires', updatedBy: 'seed',
   });
 
+  // ── autonomous mobility (docs/31): spec example states ──
+  // Self-Driving = OFF · Autonomous Delivery = OFF (awaiting legal approval)
+  engine.upsertRule({ level: 'global', target: { kind: 'feature', code: 'mob.self_driving' }, value: 'off', note: 'Requires legal approval per jurisdiction — never default-on', updatedBy: 'seed' });
+  engine.upsertRule({ level: 'global', target: { kind: 'feature', code: 'mob.autonomous_delivery' }, value: 'off', note: 'Autonomous delivery awaiting regulatory clearance', updatedBy: 'seed' });
+  // AI Driver Assistance = ON · AI Vehicle Tracking = ON
+  engine.upsertRule({ level: 'global', target: { kind: 'feature', code: 'mob.driver_assist' }, value: 'on', note: 'AI driver assistance available', updatedBy: 'seed' });
+  engine.upsertRule({ level: 'global', target: { kind: 'feature', code: 'mob.tracking' }, value: 'on', note: 'AI vehicle tracking live', updatedBy: 'seed' });
+  // Operating-mode control example: supervised autonomy permitted only in a pilot road zone
+  engine.upsertRule({ level: 'road_zone', selector: 'zone:NG-LAG-EKO-ATLANTIC', target: { kind: 'feature', code: 'mob.supervised_autonomy' }, value: 'on', note: 'Supervised-autonomy pilot corridor (Eko Atlantic)', updatedBy: 'seed' });
+  engine.upsertRule({ level: 'global', target: { kind: 'feature', code: 'mob.supervised_autonomy' }, value: 'off', note: 'Supervised autonomy OFF outside approved corridors', updatedBy: 'seed' });
+
   // Geofenced activation: airport transfer category only inside MMIA fence (15km)
   engine.upsertRule({
     level: 'category', target: { kind: 'category', code: 'transfer.airport' }, value: 'on',
