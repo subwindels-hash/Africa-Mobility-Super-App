@@ -258,3 +258,15 @@ Content-Type: application/json
 ## 5. Webhook Contracts (PSP)
 
 `POST /webhooks/paystack` — verify `x-paystack-signature` HMAC → dedupe `data.id` → idempotent state machine: `charge.succeeded` → `payment_intents.captured` + journal; `transfer.*` → payout state; `refund.*` → refund state. All raw bodies persisted (`money.psp_webhooks`) with replay tooling.
+
+## 6. WhatsApp Smart AI Platform (full spec: `26-whatsapp-ai-platform.md`)
+
+| Method | Path | Scope | Description |
+|---|---|---|---|
+| GET | `/webhooks/whatsapp` | Meta | Subscription verification (`hub.challenge`) |
+| POST | `/webhooks/whatsapp` | Meta (signed) | Inbound messages → queue → AI orchestrator |
+| POST | `/v1/whatsapp/simulate` | internal/test | Play a customer message; returns Ada's reply + meta |
+| GET | `/v1/whatsapp/sessions/{phone}` | ops | Conversation state, draft slots, history |
+| GET | `/v1/whatsapp/stats` | ops | Conversations / bookings / escalations counters |
+| GET | `/v1/whatsapp/analytics?from=&to=` | admin | Dashboard rollups |
+| POST | `/v1/whatsapp/broadcasts` | admin (MFA) | Campaign create (approved templates, opt-in only) |

@@ -18,6 +18,7 @@
  */
 import express, { type Request, type Response, type NextFunction } from 'express';
 import * as core from '../../libs/core/src/index';
+import * as wa from '../../libs/whatsapp/src/index';
 
 interface AppUser {
   id: string; phone: string; role: 'customer' | 'driver' | 'vendor'; name: string;
@@ -169,7 +170,37 @@ app.get('/v1/wallets/me', auth, (req: any, res) => {
   res.json({ userId: req.userId, balances: [...vendorBal, ...custBal], entries: mine.length });
 });
 
-app.get('/v1/health', (_req, res) => res.json({ ok: true, service: 'amsa-api', version: '1.0.0', time: new Date().toISOString() }));
+app.get('/v1/health', (_req, res) => res.json({ ok: true, service: 'amsa-api', version: '1.1.0', time: new Date().toISOString() }));
+
+// ─── WhatsApp Smart AI Customer Service Platform (docs/26) ──────────────────
+app.get('/webhooks/whatsapp', wa.verifyWebhook);
+app.post('/webhooks/whatsapp', express.raw({ type: '*/*' }) as any, (req, res) => {
+  // body may arrive as raw buffer when signature middleware is enabled
+  if (Buffer.isBuffer(req.body)) {
+    try { req.body = JSON.parse(req.body.toString('utf8')); } catch { req.body = {}; }
+  }
+  wa.webhookInbound(req, res);
+});
+
+/** Simulator: play a customer message through the AI without Meta. */
+app.post('/v1/whatsapp/simulate', async (req, res) => {
+  const { from, text, type, location, mediaId } = req.body ?? {};
+  if (!from) return problem(res, 422, 'VALIDATION_FAILED', 'from (phone) required');
+  const out = await wa.processInbound({
+    from, type: type ?? 'text', text, location, mediaId,
+    timestamp: new Date().toISOString(),
+  } as wa.InboundMessage);
+  res.json({ reply: out.text, meta: out.meta });
+});
+
+/** Conversation state + history (admin/ops view). */
+app.get('/v1/whatsapp/sessions/:phone', (req, res) => {
+  const s = wa.sessionStore.get(req.params.phone);
+  if (!s) return problem(res, 404, 'NOT_FOUND', 'No conversation for this number');
+  res.json({ phone: s.phone, language: s.language, node: s.node, escalated: s.escalated, draft: s.draft, history: s.history.slice(-20) });
+});
+
+app.get('/v1/whatsapp/stats', (_req, res) => res.json(wa.stats));
 
 const PORT = Number(process.env.PORT ?? 4000);
 if (process.env.RUN_SERVER === '1') {

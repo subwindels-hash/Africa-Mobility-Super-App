@@ -76,3 +76,8 @@ jobs:
     steps:
       - name: Sync prod (canary)
         run: echo "argo sync prod --strategy canary"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTE: copy this file to `.github/workflows/ci.yml` in the target repository.
+# (Kept out of .github/workflows here because the pushing credential lacks
+#  `workflows` scope; content is unchanged.)

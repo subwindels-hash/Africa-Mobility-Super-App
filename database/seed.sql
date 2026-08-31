@@ -82,7 +82,17 @@ INSERT INTO platform.service_categories (vertical,code,name,booking_mode,base_fa
  ('security','security.event','Event Security','quote_based',0,'{"commission_pct":12,"verification":"5_layer"}',NULL,50),
  ('security','security.corporate','Corporate Security','quote_based',0,'{"commission_pct":12,"verification":"5_layer"}',NULL,60),
  ('security','security.residential','Residential Security Coordination','quote_based',0,'{"commission_pct":12,"verification":"5_layer"}',NULL,70),
- ('security','security.airport','Airport Security Assistance','quote_based',0,'{"commission_pct":12,"verification":"5_layer"}',NULL,80);
+ ('security','security.airport','Airport Security Assistance','quote_based',0,'{"commission_pct":12,"verification":"5_layer"}',NULL,80),
+ ('roadside','roadside.recovery','Vehicle Recovery','quote_based',0,'{"custom":true}',NULL,10),
+ ('roadside','roadside.towing','Towing Requests','quote_based',3500000,'{"per_km":30000,"base_km_included":10}',NULL,20),
+ ('roadside','roadside.mechanical','Emergency Mechanical Support','quote_based',2500000,'{"per_hour":5000000}',NULL,30),
+ ('roadside','roadside.fuel','Fuel Delivery Assistance','instant',1500000,'{"per_litre":90000,"call_out":1000000}',NULL,40),
+ ('roadside','roadside.tyre','Tire Replacement Assistance','quote_based',2000000,'{"per_tyre":4500000}',NULL,50),
+ ('roadside','roadside.battery','Battery Assistance','quote_based',2000000,'{"call_out":1500000}',NULL,60),
+ ('accommodation','hotel.search','Hotel Search','search',0,'{"provider":"marketplace"}',NULL,10),
+ ('accommodation','hotel.booking','Hotel Booking','instant',0,'{"nightly":true}',NULL,20),
+ ('accommodation','apartment.booking','Apartment Booking','instant',0,'{"nightly":true}',NULL,30),
+ ('accommodation','shortlet.reservation','Short-Let Reservations','instant',0,'{"nightly":true}',NULL,40);
 
 -- Subscription plans ---------------------------------------------------------
 INSERT INTO platform.subscription_plans (tier,name,monthly_price,currency,max_listings,monthly_booking_cap,commission_discount_pts,payout_sla,features) VALUES
@@ -98,7 +108,10 @@ INSERT INTO platform.feature_flags (key,description,enabled,scope) VALUES
  ('payments.cod.enabled','Cash on delivery capped pilots',true,'{"countries":["NG"],"max_amount":15000000}'),
  ('ai.dynamic_pricing.enabled','Guardrailed surge engine',true,'{"cap":2.0,"floor":0.85}'),
  ('comms.video_consult.enabled','Video consultation rooms',true,'{}'),
- ('corporate.recurring.enabled','Recurring corporate bookings',true,'{}');
+ ('corporate.recurring.enabled','Recurring corporate bookings',true,'{}'),
+ ('whatsapp.ai.enabled','WhatsApp Smart AI assistant (docs/26)',true,'{"countries":["NG"]}'),
+ ('whatsapp.payments.links','In-chat secure payment links',true,'{"countries":["NG"]}'),
+ ('roadside.vertical.enabled','Roadside assistance marketplace',true,'{"countries":["NG"],"cities":["NG-LAG","NG-ABJ"]}');
 
 -- Notification templates (samples, en + 2 locales) ---------------------------
 INSERT INTO platform.notification_templates (code,channel,locale,template,is_critical) VALUES

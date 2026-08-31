@@ -14,12 +14,12 @@ A **technology marketplace** — AMSA owns no cars, bikes, aircraft, boats, or s
 
 | Path | Contents |
 |---|---|
-| **`docs/`** | Complete enterprise documentation library — **all 60 deliverables** (exec summary → GTM). Start at [`docs/00-INDEX.md`](docs/00-INDEX.md) |
-| **`database/`** | Complete PostgreSQL schema (75+ tables, 40+ enums, triggers, views, seed data) + ER diagrams |
-| **`backend/`** | NestJS/Node backend monorepo with **working domain core**: booking state machine, fare engine with surge guardrails, double-entry ledger, escrow lifecycle, matching engine — 23 passing tests + runnable API demo |
-| **`web/`** | Next.js 15 + TypeScript + Tailwind web platform: marketing site, Vendor Console, Corporate Portal, Admin Control Center |
+| **`docs/`** | Complete enterprise documentation library — **all 60+ deliverables** (exec summary → GTM → WhatsApp AI platform). Start at [`docs/00-INDEX.md`](docs/00-INDEX.md) |
+| **`database/`** | Complete PostgreSQL schema (86+ tables, 50+ enums, triggers, views, seed data) + ER diagrams + migrations |
+| **`backend/`** | NestJS/Node backend monorepo with **working domain core**: booking state machine, fare engine with surge guardrails, double-entry ledger, escrow lifecycle, matching engine — **and the WhatsApp Smart AI platform (Ada: NLU in 5 languages, slot-filling dialog, payment links, human escalation)** — 53 passing tests + runnable API |
+| **`web/`** | Next.js 15 + TypeScript + Tailwind web platform: marketing site, Vendor Console, Corporate Portal, Admin Control Center **+ WhatsApp AI Control Center** |
 | **`mobile/`** | Flutter apps (customer / driver / rider flavors) — feature-first clean architecture scaffold |
-| **`infra/`** | docker-compose local stack, Kubernetes (EKS) manifests, Terraform AWS baseline, GitHub Actions CI/CD |
+| **`infra/`** | docker-compose local stack, Kubernetes (EKS) manifests, Terraform AWS baseline, CI/CD pipeline with security gates |
 
 ## 🚀 Quick start
 
@@ -49,6 +49,17 @@ curl -X POST localhost:4000/v1/bookings -H "authorization: Bearer <tok>" -H 'con
 ```bash
 cd infra/local && docker compose up -d postgres   # schema.sql + seed.sql auto-load
 ```
+
+**WhatsApp AI assistant (Ada)** — full customer journey without the app:
+```bash
+curl -X POST localhost:4000/v1/whatsapp/simulate -H 'content-type: application/json' \
+  -d '{"from":"+2348012345678","text":"How far"}'
+# → greeting in Pidgin … then:
+curl -X POST localhost:4000/v1/whatsapp/simulate -H 'content-type: application/json' \
+  -d '{"from":"+2348012345678","text":"abeg I wan carry parcel from Lekki reach Yaba"}'
+# → confirmation with fare range → reply "1" → booking + escrow + secure payment link
+```
+Supports text, voice notes (ASR), images (OCR), location pins; 5 languages (EN/Hausa/Yoruba/Igbo/Pidgin); human escalation below 55% confidence. Spec: `docs/26-whatsapp-ai-platform.md`.
 
 ## 🧭 Documentation library (60 deliverables)
 

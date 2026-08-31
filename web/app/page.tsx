@@ -179,6 +179,25 @@ export default function LandingPage() {
         </Container>
       </section>
 
+      {/* WhatsApp-first */}
+      <section className="border-y border-slate-200 bg-slate-50 py-16">
+        <Container className="flex flex-col items-center gap-6 text-center">
+          <Badge tone="brand">💬 WhatsApp-first</Badge>
+          <h2 className="font-display text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">
+            No app? No problem. Meet <span className="text-brand-600">Ada</span> on WhatsApp.
+          </h2>
+          <p className="max-w-2xl text-slate-600">
+            Chat with our AI assistant to discover services, compare fares, book rides &amp; deliveries,
+            pay with secure escrow links and track your driver — in English, Hausa, Yoruba, Igbo or Pidgin.
+            Send a voice note, a location pin or even a screenshot of an address. Ada understands.
+          </p>
+          <div className="flex flex-wrap justify-center gap-3">
+            <Button href="https://wa.me/2340000000000">💬 Chat with Ada</Button>
+            <Button variant="secondary" href="/admin/whatsapp">See the AI ops console</Button>
+          </div>
+        </Container>
+      </section>
+
       {/* Cities */}
       <section id="cities" className="py-20 sm:py-24">
         <Container>

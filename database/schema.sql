@@ -25,7 +25,7 @@ CREATE TYPE subscription_plan_tier AS ENUM ('free','standard','professional','en
 CREATE TYPE asset_type AS ENUM ('car_economy','car_standard','car_premium','car_vip','car_luxury','car_executive','car_suv','motorcycle_dispatch','motorcycle_delivery','private_jet','helicopter','charter_aircraft','air_ambulance','boat','yacht','water_taxi');
 CREATE TYPE asset_status AS ENUM ('pending_docs','active','in_trip','maintenance','suspended','retired');
 CREATE TYPE booking_type AS ENUM ('instant','scheduled','corporate','recurring','quote_based');
-CREATE TYPE service_vertical AS ENUM ('transportation','logistics','travel','aviation','marine','security','corporate_services');
+CREATE TYPE service_vertical AS ENUM ('transportation','logistics','travel','aviation','marine','security','corporate_services','roadside','accommodation');
 CREATE TYPE booking_status AS ENUM ('draft','priced','requested','matched','confirmed','en_route','in_progress','completed','settled','cancelled','expired','disputed','refunded');
 CREATE TYPE booking_priority AS ENUM ('normal','priority','vip');
 CREATE TYPE payment_method_type AS ENUM ('wallet','card','bank_transfer','ussd','cash','corporate_account');
@@ -56,6 +56,14 @@ CREATE TYPE rfq_status AS ENUM ('open','quoting','awarded','expired','cancelled'
 CREATE TYPE gds_provider AS ENUM ('amadeus','sabre');
 CREATE TYPE flight_booking_status AS ENUM ('held','paid','ticketed','cancelled','refunded','failed');
 CREATE TYPE trip_role AS ENUM ('driver','rider','both');
+CREATE TYPE wa_direction AS ENUM ('inbound','outbound');
+CREATE TYPE wa_message_type AS ENUM ('text','location','audio','image','document','button','interactive','template','system');
+CREATE TYPE wa_conv_status AS ENUM ('active','awaiting_customer','with_agent','closed','expired');
+CREATE TYPE wa_escalation_reason AS ENUM ('low_confidence','negative_sentiment','explicit_request','refund','safety','fraud');
+CREATE TYPE wa_escalation_status AS ENUM ('pending','with_agent','resolved_ai','resolved_agent','abandoned');
+CREATE TYPE wa_broadcast_status AS ENUM ('draft','pending_approval','scheduled','sending','sent','failed');
+CREATE TYPE wa_template_status AS ENUM ('draft','pending_meta','approved','rejected','paused');
+CREATE TYPE wa_link_status AS ENUM ('created','opened','paid','expired','used_failed');
 
 -- ============================================================================
 -- SCHEMA: geo — countries, cities, coverage, places
@@ -1423,6 +1431,145 @@ CREATE TABLE analytics.driver_metrics_daily (
 );
 
 -- ============================================================================
+-- SCHEMA: whatsapp — Smart AI Customer Service Platform (docs/26)
+-- ============================================================================
+CREATE SCHEMA IF NOT EXISTS whatsapp;
+
+CREATE TABLE whatsapp.conversations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  wa_phone VARCHAR(20) NOT NULL,                 -- customer MSISDN
+  user_id UUID REFERENCES identity.users(id),    -- linked platform identity (OTP match)
+  status wa_conv_status NOT NULL DEFAULT 'active',
+  language TEXT NOT NULL DEFAULT 'en',           -- en | ha | yo | ig | pcm
+  current_intent TEXT,
+  current_node TEXT,                             -- dialog node (collect_slots, confirm, payment…)
+  draft_slots JSONB NOT NULL DEFAULT '{}',       -- live slot-filling state
+  context JSONB NOT NULL DEFAULT '{}',           -- rolling context memory (last booking, prefs)
+  csat SMALLINT CHECK (csat BETWEEN 1 AND 5),
+  last_message_at TIMESTAMPTZ,
+  session_started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX idx_waconv_phone ON whatsapp.conversations(wa_phone);        -- one live thread per customer
+CREATE INDEX idx_waconv_status ON whatsapp.conversations(status, last_message_at DESC);
+
+CREATE TABLE whatsapp.messages (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  conversation_id UUID NOT NULL REFERENCES whatsapp.conversations(id) ON DELETE CASCADE,
+  direction wa_direction NOT NULL,
+  type wa_message_type NOT NULL,
+  text TEXT,
+  media_url TEXT,                                -- S3 key for voice/images/docs
+  wa_message_id TEXT UNIQUE,                     -- Cloud API message id (dedupe)
+  intent TEXT,
+  confidence NUMERIC(4,3),
+  entities JSONB NOT NULL DEFAULT '{}',
+  language TEXT,
+  latency_ms INT,                                -- AI response time
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_wamsg_conv ON whatsapp.messages(conversation_id, id DESC);
+CREATE INDEX idx_wamsg_intent ON whatsapp.messages(intent, created_at DESC);
+
+CREATE TABLE whatsapp.escalations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id UUID NOT NULL REFERENCES whatsapp.conversations(id) ON DELETE CASCADE,
+  reason wa_escalation_reason NOT NULL,
+  ai_confidence NUMERIC(4,3),
+  assigned_agent_id UUID REFERENCES identity.users(id),
+  status wa_escalation_status NOT NULL DEFAULT 'pending',
+  first_response_seconds INT,
+  resolution_note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_at TIMESTAMPTZ
+);
+CREATE INDEX idx_waesc_pending ON whatsapp.escalations(status, created_at) WHERE status IN ('pending','with_agent');
+
+CREATE TABLE whatsapp.payment_links (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  public_id TEXT UNIQUE NOT NULL,                -- wpl_xxx
+  conversation_id UUID REFERENCES whatsapp.conversations(id),
+  booking_id UUID REFERENCES booking.bookings(id),
+  amount BIGINT NOT NULL,
+  currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  psp psp_provider NOT NULL DEFAULT 'paystack',
+  signature TEXT NOT NULL,                       -- HMAC (verified on redemption)
+  status wa_link_status NOT NULL DEFAULT 'created',
+  expires_at TIMESTAMPTZ NOT NULL,
+  paid_at TIMESTAMPTZ,
+  payment_intent_id UUID,                        -- FK money.payment_intents
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_walink_booking ON whatsapp.payment_links(booking_id);
+CREATE INDEX idx_walink_open ON whatsapp.payment_links(expires_at) WHERE status IN ('created','opened');
+
+CREATE TABLE whatsapp.templates (                -- Meta-approved WAMM templates
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  category TEXT NOT NULL CHECK (category IN ('UTILITY','MARKETING','AUTHENTICATION')),
+  locale TEXT NOT NULL DEFAULT 'en',
+  header TEXT, body TEXT NOT NULL, footer TEXT,
+  buttons JSONB NOT NULL DEFAULT '[]',
+  variables TEXT[] NOT NULL DEFAULT '{}',
+  meta_status wa_template_status NOT NULL DEFAULT 'draft',
+  meta_rejected_reason TEXT,
+  created_by UUID REFERENCES identity.users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (name, locale)
+);
+
+CREATE TABLE whatsapp.broadcasts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  template_id UUID REFERENCES whatsapp.templates(id),
+  name TEXT NOT NULL,
+  audience JSONB NOT NULL DEFAULT '{}',          -- {cities, verticals, tiers, opt_in_only:true}
+  status wa_broadcast_status NOT NULL DEFAULT 'draft',
+  scheduled_at TIMESTAMPTZ,
+  sent_count INT NOT NULL DEFAULT 0,
+  failed_count INT NOT NULL DEFAULT 0,
+  cost BIGINT NOT NULL DEFAULT 0, currency CHAR(3) NOT NULL DEFAULT 'NGN',
+  approved_by UUID REFERENCES identity.users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE whatsapp.broadcast_recipients (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  broadcast_id UUID NOT NULL REFERENCES whatsapp.broadcasts(id) ON DELETE CASCADE,
+  wa_phone VARCHAR(20) NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',         -- queued|sent|delivered|read|failed
+  error TEXT,
+  sent_at TIMESTAMPTZ
+);
+CREATE INDEX idx_wabrec_broadcast ON whatsapp.broadcast_recipients(broadcast_id, status);
+
+-- Daily rollups for the WhatsApp analytics dashboard
+CREATE TABLE whatsapp.analytics_daily (
+  day DATE NOT NULL,
+  country_code CHAR(2) NOT NULL DEFAULT 'NG',
+  conversations INT NOT NULL DEFAULT 0,
+  active_conversations INT NOT NULL DEFAULT 0,
+  messages_in INT NOT NULL DEFAULT 0,
+  messages_out INT NOT NULL DEFAULT 0,
+  bookings_created INT NOT NULL DEFAULT 0,
+  bookings_completed INT NOT NULL DEFAULT 0,
+  conversion_rate NUMERIC(5,4),
+  ai_resolved INT NOT NULL DEFAULT 0,
+  escalations INT NOT NULL DEFAULT 0,
+  avg_ai_response_ms INT,
+  avg_first_response_s INT,                      -- human agent first-response
+  csat_avg NUMERIC(3,2),
+  gmv BIGINT NOT NULL DEFAULT 0,
+  revenue BIGINT NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, country_code)
+);
+
+-- Marketing/consent: WhatsApp outreach requires explicit opt-in (NDPR + Meta policy)
+ALTER TABLE identity.consents
+  ADD CONSTRAINT consent_purpose_wa CHECK (purpose <> 'whatsapp_marketing' OR granted = true) NOT VALID;
+
+-- ============================================================================
 -- HELPFUL VIEWS
 -- ============================================================================
 CREATE OR REPLACE VIEW booking.v_active_bookings AS
@@ -1444,6 +1591,26 @@ FROM vendor.asset_documents WHERE expires_at < now() + INTERVAL '30 days'
 UNION ALL
 SELECT 'personnel', id, 'license', license_expiry
 FROM secops.security_personnel WHERE license_expiry < now() + INTERVAL '30 days';
+
+CREATE OR REPLACE VIEW whatsapp.v_agent_inbox AS
+SELECT e.id, e.conversation_id, c.wa_phone, c.language, e.reason, e.status, e.ai_confidence,
+       c.last_message_at, u.full_name AS agent
+FROM whatsapp.escalations e
+JOIN whatsapp.conversations c ON c.id = e.conversation_id
+LEFT JOIN identity.users u ON u.id = e.assigned_agent_id
+WHERE e.status IN ('pending','with_agent')
+ORDER BY e.created_at;
+
+CREATE OR REPLACE VIEW whatsapp.v_conversation_performance AS
+SELECT c.id, c.wa_phone, c.status, c.language,
+       COUNT(m.id) FILTER (WHERE m.direction = 'inbound') AS msgs_in,
+       COUNT(m.id) FILTER (WHERE m.direction = 'outbound') AS msgs_out,
+       MAX(m.confidence) AS top_confidence,
+       MAX(m.created_at) AS last_at,
+       (SELECT COUNT(*) FROM booking.bookings b WHERE b.customer_id = c.user_id AND b.created_at > c.session_started_at) AS bookings_this_session
+FROM whatsapp.conversations c
+LEFT JOIN whatsapp.messages m ON m.conversation_id = c.id
+GROUP BY c.id;
 
 -- ============================================================================
 -- ROW-LEVEL SECURITY EXAMPLE (multi-tenant isolation for future split)
