@@ -15,8 +15,8 @@ class EnvConfig {
   final String realtimeUrl;
   final String googleMapsKey;
 
-  factory EnvConfig.fromEnvironment() {
-    const flavorName = String.fromEnvironment('APP_FLAVOR', defaultValue: 'customer');
+  factory EnvConfig.fromEnvironment({String? flavorOverride}) {
+    final flavorName = flavorOverride ?? const String.fromEnvironment('APP_FLAVOR', defaultValue: 'customer');
     final flavor = AppFlavor.values.firstWhere(
       (f) => f.name == flavorName,
       orElse: () => AppFlavor.customer,
