@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+.venv/
+
+# Builds
+dist/
+.next/
+out/
+build/
+*.tsbuildinfo
+
+# Flutter/Dart
+.dart_tool/
+.packages
+.flutter-plugins*
+mobile/.flutter-plugins-dependencies
+
+# Env & secrets
+.env
+.env.*
+*.pem
+*.key
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Coverage & caches
+coverage/
+__pycache__/
+*.log

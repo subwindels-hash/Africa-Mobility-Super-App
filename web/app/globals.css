@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+@theme {
+  /* AMSA Design System (docs/15-design-system.md) */
+  --color-brand-50: #e3f7eb;
+  --color-brand-100: #c8efdB;
+  --color-brand-300: #74d69b;
+  --color-brand-500: #17a558;
+  --color-brand-600: #128a49;
+  --color-brand-700: #146b4a;
+  --color-brand-900: #0b3d2e;
+  --color-gold-100: #fbf3dd;
+  --color-gold-600: #c2932a;
+  --color-teal-500: #0e7c86;
+  --color-sky-500: #0e67a6;
+  --color-danger-600: #d92d20;
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-display: "Manrope", "Inter", system-ui, sans-serif;
+}
+
+html { scroll-behavior: smooth; }
+body { @apply bg-white text-slate-900 antialiased; }
+
+.font-display { font-family: var(--font-display); }
